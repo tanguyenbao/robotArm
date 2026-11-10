@@ -1,5 +1,6 @@
-from features.show_arm.show_arm import show_arm_run
+from features.chess_arm.chess_arm_controller import ChessArmController
 
+# feature name -> controller class; main.py hands the class to the UI
 FEATURE_TABLE = {
-    "show_arm": show_arm_run,
+    "chess_arm": ChessArmController,
 }

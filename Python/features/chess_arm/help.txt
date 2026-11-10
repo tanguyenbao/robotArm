@@ -1,0 +1,17 @@
+chess_arm - a 6-joint (RRRRRR) robot arm plays chess in a 3D simulator. Gemini chooses the robot's moves.
+
+Run:  python main.py            (opens the window; chess_arm is the default feature)
+
+Gemini card
+  API key      typed here (kept in memory only) or taken from the GEMINI_API_KEY environment variable.
+  Model        press "Refresh models" to list every model of your key that can generate text, then pick one.
+               The box is editable: you can also type any model name. Nothing is hard-coded.
+Game card
+  Gemini plays Black / White / Both (Gemini vs Gemini) / None (manual).
+  Your move    UCI (e2e4, e7e8q) or SAN (Nf3, O-O), then Play or Enter.
+  Gemini move now   ask Gemini for the side to move.
+  New game     reset board and arm; the side picked in "Gemini plays" ends up nearest to the arm.
+Arm card
+  Speed slider and live joint angles. Mouse in the 3D view: drag = orbit, wheel = zoom, double-click = reset view.
+
+If Gemini answers with an illegal move it is asked again (3 tries), then the game waits for you.

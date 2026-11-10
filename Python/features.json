@@ -1,7 +1,7 @@
 {
-  "show_arm": {
-    "keywords": ["show", "arm", "simulate"],
+  "chess_arm": {
+    "keywords": ["chess", "arm", "gemini", "simulate"],
     "arguments": [],
-    "help": "features/show_arm/help.txt"
+    "help": "features/chess_arm/help.txt"
   }
 }

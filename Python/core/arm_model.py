@@ -1,43 +1,52 @@
-"""Pure robot arm model: 3-DOF arm (base yaw, shoulder pitch, elbow pitch) with forward kinematics.
+"""6-DOF all-revolute arm (R-R-R-R-R-R): forward kinematics and joint limits.
 
-Link lengths are placeholders until the real arm is decided.
+Zero pose: every link points straight up (+Z). Joint axes in the local frame after the previous joints:
+J1 base yaw (Z), J2 shoulder (Y), J3 elbow (Y), J4 forearm roll (Z), J5 wrist pitch (Y), J6 tool roll (Z).
+Tool pointing straight down means J2 + J3 + J5 = 180 degrees with J4 = 0.
 """
+from __future__ import annotations
+
 from dataclasses import dataclass
-import math
 
 import numpy as np
+
+from core.transforms import transform_rotation_y, transform_rotation_z, transform_translation
+
+ARM_JOINT_COUNT = 6
+ARM_JOINT_NAMES = ("Base", "Shoulder", "Elbow", "Forearm roll", "Wrist", "Tool roll")
+ARM_JOINT_LIMITS_DEG = np.array([[-170, 170], [-100, 100], [-155, 155], [-170, 170], [-125, 125], [-180, 180]], dtype=float)
+ARM_HOME_DEG = (0.0, 40.0, 70.0, 0.0, 70.0, 0.0)
 
 
 @dataclass(frozen=True)
 class ArmGeometry:
-    base_height_mm: float = 80.0
-    upper_arm_mm: float = 120.0
-    forearm_mm: float = 100.0
+    shoulder_height_mm: float = 130.0
+    upper_arm_mm: float = 290.0
+    forearm_mm: float = 250.0
+    wrist_offset_mm: float = 60.0
+    wrist_to_flange_mm: float = 50.0
+    tool_length_mm: float = 110.0
 
 
-@dataclass
-class ArmPose:
-    base_yaw_deg: float = 0.0
-    shoulder_pitch_deg: float = 45.0
-    elbow_pitch_deg: float = -60.0
+def arm_model_home_joints() -> np.ndarray:
+    """Home pose in radians (tool pointing down)."""
+    return np.radians(ARM_HOME_DEG)
 
 
-def arm_model_joint_positions(geometry: ArmGeometry, pose: ArmPose) -> np.ndarray:
-    """Return a (4, 3) array: base, shoulder, elbow, tool tip positions in mm."""
-    yaw = math.radians(pose.base_yaw_deg)
-    shoulder = math.radians(pose.shoulder_pitch_deg)
-    elbow_total = shoulder + math.radians(pose.elbow_pitch_deg)
+def arm_model_limits_rad() -> np.ndarray:
+    """(6, 2) joint limits in radians."""
+    return np.radians(ARM_JOINT_LIMITS_DEG)
 
-    base = np.array([0.0, 0.0, 0.0])
-    shoulder_point = np.array([0.0, 0.0, geometry.base_height_mm])
 
-    def planar_to_world(radial_mm: float, height_mm: float) -> np.ndarray:
-        return np.array([radial_mm * math.cos(yaw), radial_mm * math.sin(yaw), height_mm])
-
-    elbow_point = shoulder_point + planar_to_world(
-        geometry.upper_arm_mm * math.cos(shoulder), geometry.upper_arm_mm * math.sin(shoulder)
-    )
-    tip_point = elbow_point + planar_to_world(
-        geometry.forearm_mm * math.cos(elbow_total), geometry.forearm_mm * math.sin(elbow_total)
-    )
-    return np.vstack([base, shoulder_point, elbow_point, tip_point])
+def arm_model_frames(geometry: ArmGeometry, joints_rad: np.ndarray) -> np.ndarray:
+    """Return (8, 4, 4): base, frames after J1..J6, and the tool centre point (fingertip line)."""
+    frames = np.empty((8, 4, 4))
+    frames[0] = np.eye(4)
+    frames[1] = transform_rotation_z(joints_rad[0])
+    frames[2] = frames[1] @ transform_translation(0, 0, geometry.shoulder_height_mm) @ transform_rotation_y(joints_rad[1])
+    frames[3] = frames[2] @ transform_translation(0, 0, geometry.upper_arm_mm) @ transform_rotation_y(joints_rad[2])
+    frames[4] = frames[3] @ transform_translation(0, 0, geometry.forearm_mm) @ transform_rotation_z(joints_rad[3])
+    frames[5] = frames[4] @ transform_translation(0, 0, geometry.wrist_offset_mm) @ transform_rotation_y(joints_rad[4])
+    frames[6] = frames[5] @ transform_translation(0, 0, geometry.wrist_to_flange_mm) @ transform_rotation_z(joints_rad[5])
+    frames[7] = frames[6] @ transform_translation(0, 0, geometry.tool_length_mm)
+    return frames

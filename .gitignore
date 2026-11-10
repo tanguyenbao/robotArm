@@ -21,3 +21,6 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 ~$*
+
+# Scratch tests
+.Doc/scratch/

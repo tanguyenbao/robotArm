@@ -12,7 +12,7 @@ Robot arm project. Layout follows the ElderScroll project.
 
 ## Branches
 - `main` - project skeleton.
-- `simulator` - robot arm simulation (Python).
+- `simulator` - 6R robot arm playing chess against Gemini, 3D simulator (Python). Start with `Tool/run_gui.ps1`.
 
 ## Editor setup
 - Python: create `.venv` in the project root and select it as the VS Code interpreter.
