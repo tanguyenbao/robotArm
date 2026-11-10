@@ -8,6 +8,9 @@ Gemini card
                The box is editable: you can also type any model name. Nothing is hard-coded.
 Game card
   Gemini plays Black / White / Both (Gemini vs Gemini) / None (manual).
+  Click        click one of your pieces (side to move): its legal squares light up (gold = move, red = capture);
+               click a lit square and the arm plays it. A pawn reaching the last rank becomes a queen.
+               Click another piece to change the selection, click anywhere else to cancel.
   Your move    UCI (e2e4, e7e8q) or SAN (Nf3, O-O), then Play or Enter.
   Gemini move now   ask Gemini for the side to move.
   New game     reset board and arm; the side picked in "Gemini plays" ends up nearest to the arm.

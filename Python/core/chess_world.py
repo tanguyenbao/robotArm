@@ -53,6 +53,15 @@ class ChessWorld:
         y_mm = CHESS_BOARD_CENTER_MM[1] + sign * (rank_index - 3.5) * CHESS_SQUARE_MM
         return x_mm, y_mm
 
+    def square_at(self, x_mm: float, y_mm: float) -> int | None:
+        """Square under a table point, or None when the point is off the board."""
+        sign = -1.0 if self.black_near_robot else 1.0
+        file_index = int((4.0 + sign * (x_mm - CHESS_BOARD_CENTER_MM[0]) / CHESS_SQUARE_MM) // 1)
+        rank_index = int((4.0 + sign * (y_mm - CHESS_BOARD_CENTER_MM[1]) / CHESS_SQUARE_MM) // 1)
+        if 0 <= file_index < 8 and 0 <= rank_index < 8:
+            return chess.square(file_index, rank_index)
+        return None
+
     def next_grave_xy(self, is_white: bool) -> tuple[float, float]:
         """Next free graveyard slot for a captured piece of this colour (white left, black right of the board)."""
         index = self.grave_count[is_white]

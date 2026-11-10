@@ -107,3 +107,10 @@ def scene_render_batch_join(first: FaceBatch, second: FaceBatch) -> FaceBatch:
     """Concatenate two batches (faces of `first` come first in the index space)."""
     return FaceBatch(np.concatenate([first.points, second.points]), np.concatenate([first.colors, second.colors]),
                      np.concatenate([first.depth, second.depth]))
+
+
+def scene_render_pick_ray(camera: SceneCamera, width: int, height: int, x: float, y: float) -> tuple[np.ndarray, np.ndarray]:
+    """World-space ray (origin, unit direction) through the screen point (x, y)."""
+    eye, (right, up, forward), focal = _camera_setup(camera, height)
+    direction = forward + right * ((x - width / 2) / focal) - up * ((y - height / 2) / focal)
+    return eye, _unit(direction)

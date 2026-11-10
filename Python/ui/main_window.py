@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         left.addLayout(header)
 
         self._viewport = SceneViewport(self.controller.chess_arm_scene)
+        self._viewport.clicked.connect(self._on_viewport_click)
         left.addWidget(self._viewport, 1)
         self._log_view = QPlainTextEdit()
         self._log_view.setReadOnly(True)
@@ -204,6 +205,10 @@ class MainWindow(QMainWindow):
     def _on_play_move(self) -> None:
         if self.controller.chess_arm_submit_move_text(self._move_edit.text()):
             self._move_edit.clear()
+
+    def _on_viewport_click(self, origin, direction) -> None:
+        self.controller.chess_arm_click_ray(origin, direction)
+        self._viewport.refresh()
 
     def _on_new_game(self) -> None:
         self.controller.chess_arm_new_game()

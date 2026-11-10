@@ -6,11 +6,12 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
-from core.scene_render import FaceBatch, SceneCamera, scene_render_batch_join, scene_render_faces, scene_render_order
+from core.scene_render import (FaceBatch, SceneCamera, scene_render_batch_join, scene_render_faces, scene_render_order,
+                               scene_render_pick_ray)
 from core.world_scene import WorldScene
 
 
@@ -25,11 +26,14 @@ def _colors(batch: FaceBatch) -> list[QColor]:
 class SceneViewport(QWidget):
     """Shows whatever `scene_provider` returns. Call refresh() after the scene changed."""
 
+    clicked = Signal(object, object)  # world ray (origin, direction) of a click that did not drag
+
     def __init__(self, scene_provider: Callable[[], WorldScene], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._scene_provider = scene_provider
         self._camera = SceneCamera()
         self._drag_from: QPointF | None = None
+        self._press_at: QPointF | None = None
         self._fast = False
         self._cache_key: tuple | None = None
         self._background_image: QImage | None = None
@@ -37,7 +41,7 @@ class SceneViewport(QWidget):
         self._static_polygons: list[QPolygonF] = []
         self._static_colors: list[QColor] = []
         self.setMinimumSize(520, 380)
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def set_fast(self, fast: bool) -> None:
         """Fast mode skips anti-aliasing while the arm is moving."""
@@ -49,16 +53,24 @@ class SceneViewport(QWidget):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self._drag_from = event.position()
-        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        self._press_at = event.position()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        was_click = self._press_at is not None and (event.position() - self._press_at).manhattanLength() < 5
         self._drag_from = None
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self._press_at = None
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        if was_click and event.button() == Qt.MouseButton.LeftButton:
+            origin, direction = scene_render_pick_ray(self._camera, self.width(), self.height(),
+                                                      event.position().x(), event.position().y())
+            self.clicked.emit(origin, direction)
         self.update()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._drag_from is None:
             return
+        if self._press_at is not None and (event.position() - self._press_at).manhattanLength() >= 5:
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
         delta = event.position() - self._drag_from
         self._drag_from = event.position()
         self._camera.azimuth_deg -= delta.x() * 0.4

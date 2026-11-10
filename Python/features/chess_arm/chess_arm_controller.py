@@ -16,6 +16,7 @@ from adapters.gemini_client import GeminiError, GeminiModel, gemini_client_gener
 from core.arm_model import ARM_JOINT_NAMES, ArmGeometry, arm_model_home_joints
 from core.arm_visual import ARM_GRIPPER_OPEN_MM
 from core.chess_motion import ChessMotionError, MotionEvent, MotionSegment, chess_motion_plan
+from core.chess_pieces import CHESS_PIECE_HEIGHT_MM
 from core.chess_world import ChessWorld
 from core.gemini_prompt import chess_move_from_text, gemini_prompt_build, gemini_prompt_parse_move
 from core.world_scene import WorldScene, world_scene_build, world_scene_tool_position
@@ -23,6 +24,10 @@ from core.world_scene import WorldScene, world_scene_build, world_scene_tool_pos
 CHESS_ARM_ROBOT_SIDES = ("Black", "White", "Both (Gemini vs Gemini)", "None (manual)")
 _MAX_GEMINI_TRIES = 3
 _HIGHLIGHT_RGB = (0.45, 0.62, 0.95)
+_SELECTED_RGB = (0.96, 0.82, 0.40)
+_CAPTURE_RGB = (0.93, 0.50, 0.50)
+_PICK_HEIGHTS_MM = (70.0, 45.0, 22.0)
+_PICK_RADIUS_MM = 15.0
 
 
 def _smoothstep(fraction: float) -> float:
@@ -50,6 +55,9 @@ class ChessArmController:
         self._segment_index = 0
         self._segment_time = 0.0
         self._highlights: dict[int, tuple] = {}
+        self._last_move_squares: tuple[int, ...] = ()
+        self._selected: int | None = None
+        self._targets: dict[int, chess.Move] = {}
         self._generation = 0                   # bumped on a new game so stale Gemini answers are ignored
         self._auto_blocked = False
         self._status_note = ""
@@ -65,7 +73,8 @@ class ChessArmController:
         self.joints = arm_model_home_joints()
         self.gripper_mm = ARM_GRIPPER_OPEN_MM
         self._segments = []
-        self._highlights = {}
+        self._last_move_squares = ()
+        self._clear_selection()
         self._auto_blocked = False
         self._status_note = ""
         self.state = "idle"
@@ -92,6 +101,61 @@ class ChessArmController:
             return False
         self._auto_blocked = False
         return self._start_move(move, "You")
+
+    def chess_arm_click_ray(self, origin: np.ndarray, direction: np.ndarray) -> None:
+        """The user clicked the 3D view: find the square (or piece) under the ray and handle it."""
+        if direction[2] >= 0:
+            return
+        ground_hit = origin + (0.0 - origin[2]) / direction[2] * direction
+        ground_square = self.world.square_at(ground_hit[0], ground_hit[1])
+        if self._selected is not None and ground_square in self._targets:
+            self.chess_arm_click_square(ground_square)  # a lit tile wins over a piece standing in front of it
+            return
+        for height in (*_PICK_HEIGHTS_MM, 0.0):
+            t = (height - origin[2]) / direction[2]
+            hit = origin + t * direction
+            square = self.world.square_at(hit[0], hit[1])
+            if square is None:
+                continue
+            piece = self.world.piece_on(square)
+            on_body = (piece is not None and CHESS_PIECE_HEIGHT_MM[piece.kind] >= height
+                       and np.hypot(hit[0] - piece.x_mm, hit[1] - piece.y_mm) <= _PICK_RADIUS_MM)
+            if height == 0.0 or on_body:
+                self.chess_arm_click_square(square)
+                return
+
+    def chess_arm_click_square(self, square: int) -> None:
+        """First click selects a piece of the side to move, a click on a lit square plays the move."""
+        if self.state != "idle" or self.board.is_game_over():
+            return
+        if self._selected is not None and square in self._targets:
+            move = self._targets[square]
+            self._auto_blocked = False
+            self._start_move(move, "You")
+            return
+        piece = self.board.piece_at(square)
+        if piece is not None and piece.color == self.board.turn and square != self._selected:
+            self._selected = square
+            self._targets = {}
+            for move in self.board.legal_moves:
+                if move.from_square == square and move.promotion in (None, chess.QUEEN):
+                    self._targets[move.to_square] = move
+            self._refresh_highlights()
+        else:
+            self._clear_selection()
+
+    def _clear_selection(self) -> None:
+        self._selected = None
+        self._targets = {}
+        self._refresh_highlights()
+
+    def _refresh_highlights(self) -> None:
+        highlights: dict[int, tuple] = {square: _HIGHLIGHT_RGB for square in self._last_move_squares}
+        if self._selected is not None:
+            highlights[self._selected] = _SELECTED_RGB
+            for square, move in self._targets.items():
+                highlights[square] = _CAPTURE_RGB if self.board.is_capture(move) else _SELECTED_RGB
+        self._highlights = highlights
 
     def chess_arm_request_robot_move(self) -> None:
         """Ask Gemini for a move for the side to move, now."""
@@ -189,7 +253,8 @@ class ChessArmController:
         prefix = f"{number}. " if self.board.turn == chess.WHITE else f"{number}... "
         self.board.push(move)
         self.san_history.append(san)
-        self._highlights = {move.from_square: _HIGHLIGHT_RGB, move.to_square: _HIGHLIGHT_RGB}
+        self._last_move_squares = (move.from_square, move.to_square)
+        self._clear_selection()
         self._log(f"{prefix}{san}  ({move.uci()}) by {who}")
         self._segments, self._segment_index, self._segment_time = segments, 0, 0.0
         self.state = "moving"
