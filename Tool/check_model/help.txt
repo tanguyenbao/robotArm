@@ -1,0 +1,27 @@
+check_model - terminal check that a Gemini / Gemma model can play chess for the arm
+
+Uses the GUI's own client, prompt and move parser, so a PASS here means the GUI works with that model.
+Sends 4 positions (opening as White, as Black, castling, promotion). Up to 3 tries each, like the GUI.
+
+Run from D:\RobotArm with the project venv:
+  .venv\Scripts\python.exe Tool\check_model\check_model.py --list gemma
+  .venv\Scripts\python.exe Tool\check_model\check_model.py --model <name from the list>
+
+Options:
+  --list [FILTER]   list models that can generate text (filter by name, e.g. gemma), then exit
+  --sweep [FILTER]  quick test of every listed model (filter e.g. gemma): 1 position, 1 try each, one result line
+                    per model. Use it to find which models answer at all.
+  --model NAME     model id to test
+  --key KEY         API key. Default: GEMINI_API_KEY, otherwise a hidden prompt. Never printed.
+  --live            use the Live API (WebSocket) instead of generateContent. Needs the websockets package
+                    (.venv\Scripts\python.exe -m pip install websockets). Live models answer in audio; the tool
+                    reads the text from the audio transcription and throws the audio away. Free-tier access to
+                    Live is NOT documented: this flag is how you find out for your key.
+  --trace           with --live: one line per server message (flags, transcription, text parts, audio size).
+                    Use it to see why a Live answer has no move in it.
+  --bare          send only the prompt, no generationConfig. Use it when a model answers HTTP 500/400:
+                    if --bare works and the normal run fails, the setting (temperature) is the cause.
+  --tries N        tries per position (default 3)
+
+Output: one timestamped line per step (prompt size, answer time, raw answer, parsed move), then a
+PASS/FAIL line per position and a RESULT line. Exit code 0 = all positions passed.

@@ -18,7 +18,9 @@ from core.arm_visual import ARM_GRIPPER_OPEN_MM
 from core.chess_motion import ChessMotionError, MotionEvent, MotionSegment, chess_motion_plan
 from core.chess_pieces import CHESS_PIECE_HEIGHT_MM
 from core.chess_world import ChessWorld
-from core.gemini_prompt import chess_move_from_text, gemini_prompt_build, gemini_prompt_parse_move
+from adapters.gemini_live_client import gemini_live_generate_text
+from core.gemini_prompt import (GEMINI_LIVE_FOLLOW_UP, GEMINI_LIVE_SYSTEM_PROMPT, chess_move_from_text,
+                                gemini_prompt_build, gemini_prompt_parse_move)
 from core.world_scene import WorldScene, world_scene_build, world_scene_tool_position
 
 CHESS_ARM_ROBOT_SIDES = ("Black", "White", "Both (Gemini vs Gemini)", "None (manual)")
@@ -45,6 +47,7 @@ class ChessArmController:
         self.board = chess.Board()
         self.san_history: list[str] = []
         self.api_key = ""
+        self.use_live = False  # True: ask Gemini through the Live API (WebSocket) instead of generateContent
         self.model_name = ""
         self.robot_side = CHESS_ARM_ROBOT_SIDES[0]
         self.speed = 1.0
@@ -172,10 +175,11 @@ class ChessArmController:
     def chess_arm_refresh_models(self, done: Callable[[list[GeminiModel], str], None]) -> None:
         """Fetch the model list in a worker thread; `done(models, error)` runs on the UI thread."""
         api_key = self._resolve_api_key()
+        method = "bidiGenerateContent" if self.use_live else "generateContent"
 
         def work() -> None:
             try:
-                models, error = gemini_client_list_models(api_key), ""
+                models, error = gemini_client_list_models(api_key, method=method), ""
             except GeminiError as failure:
                 models, error = [], str(failure)
             self._post_to_ui(lambda: done(models, error))
@@ -195,13 +199,32 @@ class ChessArmController:
         generation = self._generation
         board_copy, history, api_key = self.board.copy(), list(self.san_history), self._resolve_api_key()
         side = "White" if board_copy.turn == chess.WHITE else "Black"
-        self._log(f"Gemini ({model_name}) is thinking as {side} ...")
+        live = self.use_live
+        self._log(f"Gemini ({model_name}{', Live' if live else ''}) is thinking as {side} ...")
+
+        def has_move(text: str) -> bool:
+            try:
+                gemini_prompt_parse_move(text, board_copy)
+                return True
+            except ValueError:
+                return False
+
+        def ask(prompt: str) -> str:
+            if live:
+                return gemini_live_generate_text(
+                    api_key, model_name, prompt, 120.0, system_instruction=GEMINI_LIVE_SYSTEM_PROMPT, accept=has_move,
+                    follow_up=GEMINI_LIVE_FOLLOW_UP,
+                    trace=lambda text: self._post_to_ui(lambda line=text: self._log(f"Gemini Live: {line}"))
+                    if text.startswith("no usable") else None)
+            return gemini_client_generate_text(
+                api_key, model_name, prompt,
+                on_retry=lambda text: self._post_to_ui(lambda line=text: self._log(f"Gemini: {line}")))
 
         def work() -> None:
             feedback = ""
             for attempt in range(1, _MAX_GEMINI_TRIES + 1):
                 try:
-                    answer = gemini_client_generate_text(api_key, model_name, gemini_prompt_build(board_copy, history, feedback))
+                    answer = ask(gemini_prompt_build(board_copy, history, feedback))
                 except GeminiError as failure:
                     self._post_to_ui(lambda message=str(failure): self._on_gemini_failed(generation, message))
                     return

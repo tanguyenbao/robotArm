@@ -4,6 +4,9 @@ Run:  python main.py            (opens the window; chess_arm is the default feat
 
 Gemini card
   API key      typed here (kept in memory only) or taken from the GEMINI_API_KEY environment variable.
+  Connection   Standard = one generateContent request per move. Live = a WebSocket session (needs the websockets
+               package); fast, but the models answer in voice, so the move is read from the transcription.
+               Changing it clears the model box: press "Refresh models" again for the matching list.
   Model        press "Refresh models" to list every model of your key that can generate text, then pick one.
                The box is editable: you can also type any model name. Nothing is hard-coded.
 Game card

@@ -16,7 +16,8 @@ from ui.theme import STYLE_SHEET
 from ui.viewport import SceneViewport
 
 _TICK_MS = 33
-_PREFERRED_MODEL = "gemini-2.5-flash"
+_CONNECTION_KINDS = ("Standard", "Live")
+_PREFERRED_MODELS = {"Standard": "gemini-2.5-flash", "Live": "gemini-3.8-live-extended-thinking"}
 
 
 class _UiPoster(QObject):
@@ -106,6 +107,13 @@ class MainWindow(QMainWindow):
         self._key_edit.textChanged.connect(lambda text: setattr(self.controller, "api_key", text))
         layout.addWidget(self._key_edit)
 
+        self._connection_combo = QComboBox()
+        self._connection_combo.addItems(_CONNECTION_KINDS)
+        self._connection_combo.setToolTip("Standard = generateContent (one request per move). "
+                                          "Live = WebSocket session; fast, and models answer in voice, so the text comes from the transcription.")
+        self._connection_combo.currentTextChanged.connect(self._on_connection_changed)
+        layout.addWidget(self._connection_combo)
+
         self._model_combo = QComboBox()
         self._model_combo.setEditable(True)
         self._model_combo.lineEdit().setPlaceholderText("Model - press Refresh, or type a name")
@@ -182,6 +190,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_log_view"):
             self._log_view.appendPlainText(text)
 
+    def _on_connection_changed(self, text: str) -> None:
+        self.controller.use_live = text == "Live"
+        self._model_combo.clear()  # a Standard model name does not work on Live and the other way round
+        self._append_log(f"Connection: {text}. Press Refresh models to load the matching model list.")
+
     def _on_refresh_models(self) -> None:
         self._refresh_button.setEnabled(False)
         self._append_log("Loading the model list from Gemini ...")
@@ -198,9 +211,11 @@ class MainWindow(QMainWindow):
             self._model_combo.addItem(model.name)
             self._model_combo.setItemData(self._model_combo.count() - 1, model.display_name, Qt.ItemDataRole.ToolTipRole)
         names = [model.name for model in models]
-        choice = previous if previous in names else (_PREFERRED_MODEL if _PREFERRED_MODEL in names else (names[0] if names else ""))
+        preferred = _PREFERRED_MODELS[self._connection_combo.currentText()]
+        choice = previous if previous in names else (preferred if preferred in names else (names[0] if names else ""))
         self._model_combo.setCurrentText(choice)
-        self._append_log(f"{len(models)} models can generate text. Selected: {choice or 'none'}.")
+        kind = "support the Live API" if self.controller.use_live else "can generate text"
+        self._append_log(f"{len(models)} models {kind}. Selected: {choice or 'none'}.")
 
     def _on_play_move(self) -> None:
         if self.controller.chess_arm_submit_move_text(self._move_edit.text()):
