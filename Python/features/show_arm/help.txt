@@ -1,0 +1,3 @@
+show_arm - open the 3D simulator window with the robot arm.
+Sliders: base yaw, shoulder pitch, elbow pitch (degrees).
+Run:  python main.py show_arm      (or just: python main.py)

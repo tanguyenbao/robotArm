@@ -1,0 +1,7 @@
+{
+  "show_arm": {
+    "keywords": ["show", "arm", "simulate"],
+    "arguments": [],
+    "help": "features/show_arm/help.txt"
+  }
+}
