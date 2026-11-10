@@ -1,0 +1,23 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# C / embedded build output (user owns the build)
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+compile_commands.json
+
+# Local tool state and possible secrets
+.mcp.json
+.workspaces/
+*.log
+
+# OS / Office
+Thumbs.db
+Desktop.ini
+.DS_Store
+~$*

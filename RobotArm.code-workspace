@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{ "name": "Python", "path": "Python" },
+		{ "name": "C (firmware)", "path": "C" },
+		{ "name": "Tool", "path": "Tool" },
+		{ "name": "Doc", "path": ".Doc" }
+	],
+	"settings": {
+		"files.exclude": {
+			"**/__pycache__": true,
+			"**/build": true
+		}
+	}
+}
