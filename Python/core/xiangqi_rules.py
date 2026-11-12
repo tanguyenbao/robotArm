@@ -192,3 +192,12 @@ def xiangqi_rules_ascii(position: XiangqiPosition) -> str:
         lines.append(f"{rank_index}  {cells}")
     lines.append("   " + " ".join(_FILE_LETTERS))
     return "\n".join(lines)
+
+
+def xiangqi_rules_pseudo_moves(grid: list[str | None], red_to_move: bool) -> list[tuple[int, int]]:
+    """(from, to) of every move the side can make by movement rules alone (own general safety is not checked)."""
+    moves: list[tuple[int, int]] = []
+    for square, symbol in enumerate(grid):
+        if symbol is not None and symbol.isupper() == red_to_move:
+            moves.extend((square, target) for target in _pseudo_targets(grid, square))
+    return moves

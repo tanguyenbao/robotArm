@@ -33,6 +33,7 @@ from core.xiangqi_rules import (XiangqiMove, XiangqiPosition, xiangqi_rules_in_c
                                 xiangqi_rules_move_from_text, xiangqi_rules_play, xiangqi_rules_start,
                                 xiangqi_rules_winner)
 from core.xiangqi_scene import xiangqi_scene_build
+from core.xiangqi_search import XiangqiCandidate, xiangqi_search_candidates
 from core.xiangqi_world import XiangqiWorld
 
 CHESS_ARM_GAME_TYPES = ("Chess", "Xiangqi (Cờ tướng)")
@@ -294,13 +295,21 @@ class ChessArmController:
             build_prompt = lambda feedback: gemini_prompt_build(board_copy, history, feedback)  # noqa: E731
             parse_move = lambda text: gemini_prompt_parse_move(text, board_copy)  # noqa: E731
             system_prompt, follow_up = GEMINI_LIVE_SYSTEM_PROMPT, GEMINI_LIVE_FOLLOW_UP
+            prepare = lambda: None  # noqa: E731
         else:
             position_copy = XiangqiPosition(list(self.xiangqi_position.grid), self.xiangqi_position.red_to_move)
             history = list(self.xiangqi_history)
             side = "Red" if position_copy.red_to_move else "Black"
-            build_prompt = lambda feedback: xiangqi_prompt_build(position_copy, history, feedback)  # noqa: E731
-            parse_move = lambda text: xiangqi_prompt_parse_move(text, position_copy)  # noqa: E731
+            candidates: list[XiangqiCandidate] = []  # filled by prepare() in the worker thread: the search takes seconds
+            build_prompt = lambda feedback: xiangqi_prompt_build(position_copy, history, candidates, feedback)  # noqa: E731
+            parse_move = lambda text: xiangqi_prompt_parse_move(text, position_copy, candidates)  # noqa: E731
             system_prompt, follow_up = XIANGQI_LIVE_SYSTEM_PROMPT, XIANGQI_LIVE_FOLLOW_UP
+
+            def prepare() -> None:
+                candidates[:] = xiangqi_search_candidates(position_copy)
+                listing = ", ".join(f"{item.move.iccs()}{' (' + item.note + ')' if item.note else ''} {item.score:+d}"
+                                    for item in candidates)
+                self._post_to_ui(lambda: self._log(f"Engine candidates for Gemini: {listing}"))
         self._log(f"Gemini ({model_name}{', Live' if live else ''}) is thinking as {side} ...")
 
         def has_move(text: str) -> bool:
@@ -322,6 +331,7 @@ class ChessArmController:
                 on_retry=lambda text: self._post_to_ui(lambda line=text: self._log(f"Gemini: {line}")))
 
         def work() -> None:
+            prepare()
             feedback = ""
             for attempt in range(1, _MAX_GEMINI_TRIES + 1):
                 try:

@@ -8,6 +8,9 @@ Header
                black 將士象馬車砲卒) drawn from a system font (Microsoft JhengHei / YaHei).
                Full rules: legal moves, check, flying general, horse leg, elephant eye, river, cannon screen.
                The game ends when the side to move has no legal move (that side loses). No repetition rule.
+               Gemini reads a xiangqi board badly, so a 3-ply material search (core/xiangqi_search.py, 2-4 s) first
+               removes every move that loses material or walks into a mate; Gemini picks from the remaining
+               candidates (up to 12, within 1.5 soldiers of the best) and the list is shown in the log.
                "Gemini plays White" reads "Red" in xiangqi. Moves are typed in ICCS: h2e2 = from h2 to e2
                (files a-i left to right, ranks 0-9 from the red back rank). Click-to-move works as in chess.
 Gemini card
