@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel, QLi
                                QSlider, QVBoxLayout, QWidget)
 
 from adapters.gemini_client import GeminiModel
-from features.chess_arm.chess_arm_controller import CHESS_ARM_ROBOT_SIDES, ChessArmController
+from features.chess_arm.chess_arm_controller import CHESS_ARM_GAME_TYPES, CHESS_ARM_ROBOT_SIDES, ChessArmController
 from ui.glass_widgets import GlassCard, MetalButton, MoonsilverBackground
 from ui.theme import STYLE_SHEET
 from ui.viewport import SceneViewport
@@ -66,7 +66,16 @@ class MainWindow(QMainWindow):
         self._status = QLabel("")
         self._status.setObjectName("status")
         self._status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        game_caption = QLabel("Game")
+        game_caption.setObjectName("caption")
+        self._game_type_combo = QComboBox()
+        self._game_type_combo.addItems(CHESS_ARM_GAME_TYPES)
+        self._game_type_combo.setToolTip("Board on the table. Switching starts that game from its initial position.")
+        self._game_type_combo.currentTextChanged.connect(self._on_game_type_changed)
         header.addWidget(brand)
+        header.addSpacing(18)
+        header.addWidget(game_caption)
+        header.addWidget(self._game_type_combo)
         header.addWidget(self._status, 1)
         left.addLayout(header)
 
@@ -189,6 +198,15 @@ class MainWindow(QMainWindow):
     def _append_log(self, text: str) -> None:
         if hasattr(self, "_log_view"):
             self._log_view.appendPlainText(text)
+
+    def _on_game_type_changed(self, text: str) -> None:
+        self.controller.chess_arm_set_game_type(text)
+        is_chess = self.controller.chess_arm_is_chess()
+        self._side_combo.blockSignals(True)  # only the label changes, the choice stays (White = Red)
+        self._side_combo.setItemText(1, "White" if is_chess else "Red")
+        self._side_combo.blockSignals(False)
+        self._move_edit.setPlaceholderText("Your move: e2e4 or Nf3" if is_chess else "Your move: h2e2 (files a-i, ranks 0-9)")
+        self._viewport.refresh()
 
     def _on_connection_changed(self, text: str) -> None:
         self.controller.use_live = text == "Live"

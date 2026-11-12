@@ -25,6 +25,11 @@ def _floor_meshes() -> list[Mesh]:
     return _floor_cache
 
 
+def world_scene_floor_meshes() -> list[Mesh]:
+    """The floor, shared by every board type."""
+    return _floor_meshes()
+
+
 def _board_squares(highlights: tuple) -> Mesh:
     """Squares for a white-at-bottom layout; highlights is a sorted tuple of (square, rgb)."""
     if highlights not in _board_cache:

@@ -2,6 +2,14 @@ chess_arm - a 6-joint (RRRRRR) robot arm plays chess in a 3D simulator. Gemini c
 
 Run:  python main.py            (opens the window; chess_arm is the default feature)
 
+Header
+  Game         Chess or Xiangqi (Cờ tướng). Switching puts that board on the table in its initial position.
+               Xiangqi: 9 x 10 crossings, river, palaces, 32 flat discs with the real names (red 帥仕相傌俥炮兵,
+               black 將士象馬車砲卒) drawn from a system font (Microsoft JhengHei / YaHei).
+               Full rules: legal moves, check, flying general, horse leg, elephant eye, river, cannon screen.
+               The game ends when the side to move has no legal move (that side loses). No repetition rule.
+               "Gemini plays White" reads "Red" in xiangqi. Moves are typed in ICCS: h2e2 = from h2 to e2
+               (files a-i left to right, ranks 0-9 from the red back rank). Click-to-move works as in chess.
 Gemini card
   API key      typed here (kept in memory only) or taken from the GEMINI_API_KEY environment variable.
   Connection   Standard = one generateContent request per move. Live = a WebSocket session (needs the websockets

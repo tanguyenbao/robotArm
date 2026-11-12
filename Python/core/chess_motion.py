@@ -13,6 +13,9 @@ from core.arm_visual import ARM_GRIPPER_OPEN_MM
 from core.chess_pieces import CHESS_PIECE_GRIP_GAP_MM, CHESS_PIECE_GRIP_HEIGHT_MM
 from core.chess_world import ChessWorld
 from core.world_scene import world_scene_tool_position
+from core.xiangqi_board import XIANGQI_PIECE_GRIP_GAP_MM, XIANGQI_PIECE_GRIP_HEIGHT_MM
+from core.xiangqi_rules import XiangqiMove
+from core.xiangqi_world import XiangqiWorld
 
 _FREE_HEIGHT_MM = 105.0       # tool height when travelling empty
 _CARRY_CLEARANCE_MM = 85.0    # a carried piece stays this far above the board
@@ -47,7 +50,10 @@ class MotionSegment:
 
 
 class _Planner:
-    def __init__(self, geometry: ArmGeometry, joints: np.ndarray, gripper_mm: float) -> None:
+    def __init__(self, geometry: ArmGeometry, joints: np.ndarray, gripper_mm: float,
+                 grip_heights: dict[str, float], grip_gaps: dict[str, float]) -> None:
+        self.grip_heights = grip_heights
+        self.grip_gaps = grip_gaps
         self.geometry = geometry
         self.joints = np.asarray(joints, dtype=float)
         self.gripper_mm = gripper_mm
@@ -82,11 +88,11 @@ class _Planner:
         self.joints = samples[-1].copy()
         self.gripper_mm = gripper_end_mm
 
-    def relocate(self, world: ChessWorld, piece_id: int, destination: tuple[float, float], square: int | None) -> None:
+    def relocate(self, world: ChessWorld | XiangqiWorld, piece_id: int, destination: tuple[float, float], square: int | None) -> None:
         piece = world.pieces[piece_id]
-        grab_z = CHESS_PIECE_GRIP_HEIGHT_MM[piece.kind] - 7.0
+        grab_z = self.grip_heights[piece.kind] - 7.0
         carry_z = grab_z + _CARRY_CLEARANCE_MM
-        closed = CHESS_PIECE_GRIP_GAP_MM[piece.kind]
+        closed = self.grip_gaps[piece.kind]
         source = (piece.x_mm, piece.y_mm)
         name = f"{piece.kind.upper() if piece.is_white else piece.kind}"
         self.move_to((*source, _FREE_HEIGHT_MM), _TRAVEL_SPEED_MM_S, ARM_GRIPPER_OPEN_MM, f"{name}: go over the piece")
@@ -102,7 +108,7 @@ class _Planner:
 def chess_motion_plan(world: ChessWorld, board: chess.Board, move: chess.Move, geometry: ArmGeometry,
                       start_joints: np.ndarray, start_gripper_mm: float) -> list[MotionSegment]:
     """Plan the arm motion for a legal move on `board` (the board must not have played the move yet)."""
-    planner = _Planner(geometry, start_joints, start_gripper_mm)
+    planner = _Planner(geometry, start_joints, start_gripper_mm, CHESS_PIECE_GRIP_HEIGHT_MM, CHESS_PIECE_GRIP_GAP_MM)
     mover = world.piece_on(move.from_square)
     if mover is None:
         raise ChessMotionError("no piece on the source square")
@@ -130,4 +136,18 @@ def chess_motion_plan(world: ChessWorld, board: chess.Board, move: chess.Move, g
     if move.promotion:
         symbol = chess.piece_symbol(move.promotion)
         planner.grip(ARM_GRIPPER_OPEN_MM, "promotion: swap the pawn", MotionEvent("promote", mover.piece_id, new_kind=symbol))
+    return planner.segments
+
+
+def xiangqi_motion_plan(world: XiangqiWorld, move: XiangqiMove, geometry: ArmGeometry, start_joints: np.ndarray,
+                        start_gripper_mm: float) -> list[MotionSegment]:
+    """Plan the arm motion for a legal xiangqi move: a captured piece goes to its graveyard first, then the mover is carried."""
+    planner = _Planner(geometry, start_joints, start_gripper_mm, XIANGQI_PIECE_GRIP_HEIGHT_MM, XIANGQI_PIECE_GRIP_GAP_MM)
+    mover = world.piece_on(move.from_square)
+    if mover is None:
+        raise ChessMotionError("no piece on the source crossing")
+    victim = world.piece_on(move.to_square)
+    if victim is not None:
+        planner.relocate(world, victim.piece_id, world.next_grave_xy(victim.is_white), None)
+    planner.relocate(world, mover.piece_id, world.square_xy(move.to_square), move.to_square)
     return planner.segments

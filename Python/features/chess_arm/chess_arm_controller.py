@@ -1,7 +1,10 @@
-"""Feature: the robot arm plays chess, with Gemini choosing the robot's moves. No Qt in here.
+"""Feature: the robot arm plays chess or xiangqi, with Gemini choosing the robot's moves. No Qt in here.
 
 The UI gives two callbacks: `post_to_ui` (runs a function on the UI thread, used to bring Gemini answers back from the
 worker thread) and `log` (appends a line to the log panel).
+
+Squares are integers in both games (chess: python-chess square, xiangqi: rank * 9 + file), so selection, highlights and
+the arm animation are shared. "White" in the robot-side list means Red when xiangqi is on the table.
 """
 from __future__ import annotations
 
@@ -13,16 +16,26 @@ import chess
 import numpy as np
 
 from adapters.gemini_client import GeminiError, GeminiModel, gemini_client_generate_text, gemini_client_list_models
+from adapters.gemini_live_client import gemini_live_generate_text
+from adapters.glyph_bitmap import glyph_bitmap_render
 from core.arm_model import ARM_JOINT_NAMES, ArmGeometry, arm_model_home_joints
 from core.arm_visual import ARM_GRIPPER_OPEN_MM
-from core.chess_motion import ChessMotionError, MotionEvent, MotionSegment, chess_motion_plan
+from core.chess_motion import ChessMotionError, MotionEvent, MotionSegment, chess_motion_plan, xiangqi_motion_plan
 from core.chess_pieces import CHESS_PIECE_HEIGHT_MM
 from core.chess_world import ChessWorld
-from adapters.gemini_live_client import gemini_live_generate_text
 from core.gemini_prompt import (GEMINI_LIVE_FOLLOW_UP, GEMINI_LIVE_SYSTEM_PROMPT, chess_move_from_text,
                                 gemini_prompt_build, gemini_prompt_parse_move)
 from core.world_scene import WorldScene, world_scene_build, world_scene_tool_position
+from core.xiangqi_board import XIANGQI_DISC_HEIGHT_MM, XIANGQI_PIECE_CHARS
+from core.xiangqi_prompt import (XIANGQI_LIVE_FOLLOW_UP, XIANGQI_LIVE_SYSTEM_PROMPT, xiangqi_prompt_build,
+                                 xiangqi_prompt_parse_move)
+from core.xiangqi_rules import (XiangqiMove, XiangqiPosition, xiangqi_rules_in_check, xiangqi_rules_legal_moves,
+                                xiangqi_rules_move_from_text, xiangqi_rules_play, xiangqi_rules_start,
+                                xiangqi_rules_winner)
+from core.xiangqi_scene import xiangqi_scene_build
+from core.xiangqi_world import XiangqiWorld
 
+CHESS_ARM_GAME_TYPES = ("Chess", "Xiangqi (Cờ tướng)")
 CHESS_ARM_ROBOT_SIDES = ("Black", "White", "Both (Gemini vs Gemini)", "None (manual)")
 _MAX_GEMINI_TRIES = 3
 _HIGHLIGHT_RGB = (0.45, 0.62, 0.95)
@@ -30,6 +43,8 @@ _SELECTED_RGB = (0.96, 0.82, 0.40)
 _CAPTURE_RGB = (0.93, 0.50, 0.50)
 _PICK_HEIGHTS_MM = (70.0, 45.0, 22.0)
 _PICK_RADIUS_MM = 15.0
+_XIANGQI_PICK_HEIGHT_MM = XIANGQI_DISC_HEIGHT_MM / 2
+_GLYPH_CELLS = 18
 
 
 def _smoothstep(fraction: float) -> float:
@@ -46,6 +61,11 @@ class ChessArmController:
         self.world = ChessWorld()
         self.board = chess.Board()
         self.san_history: list[str] = []
+        self.game_type = CHESS_ARM_GAME_TYPES[0]
+        self.xiangqi_world = XiangqiWorld()
+        self.xiangqi_position: XiangqiPosition = xiangqi_rules_start()
+        self.xiangqi_history: list[str] = []
+        self._xiangqi_glyphs: dict[tuple[str, bool], tuple[str, ...]] | None = None
         self.api_key = ""
         self.use_live = False  # True: ask Gemini through the Live API (WebSocket) instead of generateContent
         self.model_name = ""
@@ -60,19 +80,49 @@ class ChessArmController:
         self._highlights: dict[int, tuple] = {}
         self._last_move_squares: tuple[int, ...] = ()
         self._selected: int | None = None
-        self._targets: dict[int, chess.Move] = {}
+        self._targets: dict[int, chess.Move | XiangqiMove] = {}
         self._generation = 0                   # bumped on a new game so stale Gemini answers are ignored
         self._auto_blocked = False
         self._status_note = ""
         self.chess_arm_new_game()
 
     # ---------------------------------------------------------------- game
+    def chess_arm_is_chess(self) -> bool:
+        """True while the chess set is on the table (False: xiangqi)."""
+        return self.game_type == CHESS_ARM_GAME_TYPES[0]
+
+    def chess_arm_set_game_type(self, game_type: str) -> None:
+        """Swap the board on the table. Switching starts that game from its initial position."""
+        if game_type not in CHESS_ARM_GAME_TYPES or game_type == self.game_type:
+            return
+        self.game_type = game_type
+        self.chess_arm_new_game()
+
+    def _is_game_over(self) -> bool:
+        if self.chess_arm_is_chess():
+            return self.board.is_game_over()
+        return xiangqi_rules_winner(self.xiangqi_position) is not None
+
+    def _red_or_white_to_move(self) -> bool:
+        return self.board.turn == chess.WHITE if self.chess_arm_is_chess() else self.xiangqi_position.red_to_move
+
+    def _active_world(self) -> ChessWorld | XiangqiWorld:
+        return self.world if self.chess_arm_is_chess() else self.xiangqi_world
+
     def chess_arm_new_game(self) -> None:
-        """Reset the board and send the arm home. Board orientation follows the robot side chosen now."""
+        """Reset the board and send the arm home. The robot's own side ends up nearest to the arm."""
         self._generation += 1
-        self.board = chess.Board()
-        self.san_history = []
-        self.world.reset(self.board, black_near_robot=self.robot_side != "White")
+        flipped = self.robot_side != "White"  # black stands nearest to the arm unless the robot plays white / red
+        if self.chess_arm_is_chess():
+            self.board = chess.Board()
+            self.san_history = []
+            self.world.reset(self.board, black_near_robot=flipped)
+            first_mover = "White"
+        else:
+            self.xiangqi_position = xiangqi_rules_start()
+            self.xiangqi_history = []
+            self.xiangqi_world.reset(self.xiangqi_position, flipped=flipped)
+            first_mover = "Red"
         self.joints = arm_model_home_joints()
         self.gripper_mm = ARM_GRIPPER_OPEN_MM
         self._segments = []
@@ -81,24 +131,27 @@ class ChessArmController:
         self._auto_blocked = False
         self._status_note = ""
         self.state = "idle"
-        self._log("New game. White moves first.")
+        self._log(f"New {'chess' if self.chess_arm_is_chess() else 'xiangqi'} game. {first_mover} moves first.")
         self._maybe_auto_play()
 
     def chess_arm_set_robot_side(self, side: str) -> None:
-        """Choose which colour(s) Gemini plays."""
-        self.robot_side = side
+        """Choose which colour(s) Gemini plays ('Red' is the xiangqi name of 'White')."""
+        self.robot_side = "White" if side == "Red" else side
         self._auto_blocked = False
         self._maybe_auto_play()
 
     def chess_arm_submit_move_text(self, text: str) -> bool:
-        """Play a move typed by the user (UCI like e2e4, or SAN like Nf3). Returns True when it was accepted."""
+        """Play a move typed by the user (chess: UCI e2e4 or SAN Nf3; xiangqi: ICCS h2e2). Returns True when accepted."""
         if self.state != "idle":
             self._log("The arm is busy, wait for it to finish.")
             return False
-        if self.board.is_game_over():
+        if self._is_game_over():
             self._log("The game is over. Start a new game.")
             return False
-        move = chess_move_from_text(text.strip(), self.board)
+        if self.chess_arm_is_chess():
+            move = chess_move_from_text(text.strip(), self.board)
+        else:
+            move = xiangqi_rules_move_from_text(text, self.xiangqi_position)
         if move is None:
             self._log(f"'{text.strip()}' is not a legal move here.")
             return False
@@ -110,6 +163,9 @@ class ChessArmController:
         if direction[2] >= 0:
             return
         ground_hit = origin + (0.0 - origin[2]) / direction[2] * direction
+        if not self.chess_arm_is_chess():
+            self._click_ray_xiangqi(origin, direction, ground_hit)
+            return
         ground_square = self.world.square_at(ground_hit[0], ground_hit[1])
         if self._selected is not None and ground_square in self._targets:
             self.chess_arm_click_square(ground_square)  # a lit tile wins over a piece standing in front of it
@@ -127,37 +183,70 @@ class ChessArmController:
                 self.chess_arm_click_square(square)
                 return
 
+    def _click_ray_xiangqi(self, origin: np.ndarray, direction: np.ndarray, ground_hit: np.ndarray) -> None:
+        ground_square = self.xiangqi_world.square_at(ground_hit[0], ground_hit[1])
+        if self._selected is not None and ground_square in self._targets:
+            self.chess_arm_click_square(ground_square)  # a lit crossing wins over a disc standing in front of it
+            return
+        t = (_XIANGQI_PICK_HEIGHT_MM - origin[2]) / direction[2]
+        hit = origin + t * direction
+        square = self.xiangqi_world.square_at(hit[0], hit[1])
+        if square is not None:
+            self.chess_arm_click_square(square)
+        else:
+            self._clear_selection()
+
     def chess_arm_click_square(self, square: int) -> None:
         """First click selects a piece of the side to move, a click on a lit square plays the move."""
-        if self.state != "idle" or self.board.is_game_over():
+        if self.state != "idle" or self._is_game_over():
             return
         if self._selected is not None and square in self._targets:
             move = self._targets[square]
             self._auto_blocked = False
             self._start_move(move, "You")
             return
-        piece = self.board.piece_at(square)
-        if piece is not None and piece.color == self.board.turn and square != self._selected:
-            self._selected = square
-            self._targets = {}
-            for move in self.board.legal_moves:
-                if move.from_square == square and move.promotion in (None, chess.QUEEN):
-                    self._targets[move.to_square] = move
+        if square != self._selected and self._select_piece(square):
             self._refresh_highlights()
         else:
             self._clear_selection()
+
+    def _select_piece(self, square: int) -> bool:
+        """Select the piece of the side to move on this square and collect its legal targets."""
+        targets: dict[int, chess.Move | XiangqiMove] = {}
+        if self.chess_arm_is_chess():
+            piece = self.board.piece_at(square)
+            if piece is None or piece.color != self.board.turn:
+                return False
+            for move in self.board.legal_moves:
+                if move.from_square == square and move.promotion in (None, chess.QUEEN):
+                    targets[move.to_square] = move
+        else:
+            symbol = self.xiangqi_position.grid[square]
+            if symbol is None or symbol.isupper() != self.xiangqi_position.red_to_move:
+                return False
+            for move in xiangqi_rules_legal_moves(self.xiangqi_position):
+                if move.from_square == square:
+                    targets[move.to_square] = move
+        self._selected = square
+        self._targets = targets
+        return True
 
     def _clear_selection(self) -> None:
         self._selected = None
         self._targets = {}
         self._refresh_highlights()
 
+    def _is_capture(self, move: chess.Move | XiangqiMove) -> bool:
+        if self.chess_arm_is_chess():
+            return self.board.is_capture(move)
+        return self.xiangqi_position.grid[move.to_square] is not None
+
     def _refresh_highlights(self) -> None:
         highlights: dict[int, tuple] = {square: _HIGHLIGHT_RGB for square in self._last_move_squares}
         if self._selected is not None:
             highlights[self._selected] = _SELECTED_RGB
             for square, move in self._targets.items():
-                highlights[square] = _CAPTURE_RGB if self.board.is_capture(move) else _SELECTED_RGB
+                highlights[square] = _CAPTURE_RGB if self._is_capture(move) else _SELECTED_RGB
         self._highlights = highlights
 
     def chess_arm_request_robot_move(self) -> None:
@@ -165,7 +254,7 @@ class ChessArmController:
         if self.state != "idle":
             self._log("The arm is busy, wait for it to finish.")
             return
-        if self.board.is_game_over():
+        if self._is_game_over():
             self._log("The game is over. Start a new game.")
             return
         self._auto_blocked = False
@@ -197,14 +286,26 @@ class ChessArmController:
             return
         self.state = "thinking"
         generation = self._generation
-        board_copy, history, api_key = self.board.copy(), list(self.san_history), self._resolve_api_key()
-        side = "White" if board_copy.turn == chess.WHITE else "Black"
+        api_key = self._resolve_api_key()
         live = self.use_live
+        if self.chess_arm_is_chess():
+            board_copy, history = self.board.copy(), list(self.san_history)
+            side = "White" if board_copy.turn == chess.WHITE else "Black"
+            build_prompt = lambda feedback: gemini_prompt_build(board_copy, history, feedback)  # noqa: E731
+            parse_move = lambda text: gemini_prompt_parse_move(text, board_copy)  # noqa: E731
+            system_prompt, follow_up = GEMINI_LIVE_SYSTEM_PROMPT, GEMINI_LIVE_FOLLOW_UP
+        else:
+            position_copy = XiangqiPosition(list(self.xiangqi_position.grid), self.xiangqi_position.red_to_move)
+            history = list(self.xiangqi_history)
+            side = "Red" if position_copy.red_to_move else "Black"
+            build_prompt = lambda feedback: xiangqi_prompt_build(position_copy, history, feedback)  # noqa: E731
+            parse_move = lambda text: xiangqi_prompt_parse_move(text, position_copy)  # noqa: E731
+            system_prompt, follow_up = XIANGQI_LIVE_SYSTEM_PROMPT, XIANGQI_LIVE_FOLLOW_UP
         self._log(f"Gemini ({model_name}{', Live' if live else ''}) is thinking as {side} ...")
 
         def has_move(text: str) -> bool:
             try:
-                gemini_prompt_parse_move(text, board_copy)
+                parse_move(text)
                 return True
             except ValueError:
                 return False
@@ -212,8 +313,8 @@ class ChessArmController:
         def ask(prompt: str) -> str:
             if live:
                 return gemini_live_generate_text(
-                    api_key, model_name, prompt, 120.0, system_instruction=GEMINI_LIVE_SYSTEM_PROMPT, accept=has_move,
-                    follow_up=GEMINI_LIVE_FOLLOW_UP,
+                    api_key, model_name, prompt, 120.0, system_instruction=system_prompt, accept=has_move,
+                    follow_up=follow_up,
                     trace=lambda text: self._post_to_ui(lambda line=text: self._log(f"Gemini Live: {line}"))
                     if text.startswith("no usable") else None)
             return gemini_client_generate_text(
@@ -224,12 +325,12 @@ class ChessArmController:
             feedback = ""
             for attempt in range(1, _MAX_GEMINI_TRIES + 1):
                 try:
-                    answer = ask(gemini_prompt_build(board_copy, history, feedback))
+                    answer = ask(build_prompt(feedback))
                 except GeminiError as failure:
                     self._post_to_ui(lambda message=str(failure): self._on_gemini_failed(generation, message))
                     return
                 try:
-                    move = gemini_prompt_parse_move(answer, board_copy)
+                    move = parse_move(answer)
                 except ValueError as problem:
                     feedback = str(problem)
                     self._post_to_ui(lambda n=attempt, text=feedback: self._log(f"Gemini answer {n} refused: {text}"))
@@ -240,7 +341,7 @@ class ChessArmController:
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_gemini_move(self, generation: int, move: chess.Move, model_name: str) -> None:
+    def _on_gemini_move(self, generation: int, move: chess.Move | XiangqiMove, model_name: str) -> None:
         if generation != self._generation or self.state != "thinking":
             return
         self.state = "idle"
@@ -255,9 +356,9 @@ class ChessArmController:
         self._log(f"Gemini failed: {message}")
 
     def _maybe_auto_play(self) -> None:
-        if self.state != "idle" or self._auto_blocked or self.board.is_game_over():
+        if self.state != "idle" or self._auto_blocked or self._is_game_over():
             return
-        turn_is_white = self.board.turn == chess.WHITE
+        turn_is_white = self._red_or_white_to_move()
         wanted = (self.robot_side == CHESS_ARM_ROBOT_SIDES[2]
                   or (self.robot_side == "White" and turn_is_white)
                   or (self.robot_side == "Black" and not turn_is_white))
@@ -265,20 +366,32 @@ class ChessArmController:
             self._start_thinking()
 
     # ---------------------------------------------------------------- moves
-    def _start_move(self, move: chess.Move, who: str) -> bool:
+    def _start_move(self, move: chess.Move | XiangqiMove, who: str) -> bool:
+        chess_game = self.chess_arm_is_chess()
         try:
-            segments = chess_motion_plan(self.world, self.board, move, self.geometry, self.joints, self.gripper_mm)
+            if chess_game:
+                segments = chess_motion_plan(self.world, self.board, move, self.geometry, self.joints, self.gripper_mm)
+            else:
+                segments = xiangqi_motion_plan(self.xiangqi_world, move, self.geometry, self.joints, self.gripper_mm)
         except ChessMotionError as failure:
-            self._log(f"Cannot play {move.uci()}: {failure}")
+            self._log(f"Cannot play {move.uci() if chess_game else move.iccs()}: {failure}")
             return False
-        san = self.board.san(move)
-        number = self.board.fullmove_number
-        prefix = f"{number}. " if self.board.turn == chess.WHITE else f"{number}... "
-        self.board.push(move)
-        self.san_history.append(san)
+        if chess_game:
+            san = self.board.san(move)
+            number = self.board.fullmove_number
+            prefix = f"{number}. " if self.board.turn == chess.WHITE else f"{number}... "
+            self.board.push(move)
+            self.san_history.append(san)
+            text = f"{san}  ({move.uci()})"
+        else:
+            number = len(self.xiangqi_history) // 2 + 1
+            prefix = f"{number}. " if self.xiangqi_position.red_to_move else f"{number}... "
+            self.xiangqi_position = xiangqi_rules_play(self.xiangqi_position, move)
+            self.xiangqi_history.append(move.iccs())
+            text = move.iccs()
         self._last_move_squares = (move.from_square, move.to_square)
         self._clear_selection()
-        self._log(f"{prefix}{san}  ({move.uci()}) by {who}")
+        self._log(f"{prefix}{text} by {who}")
         self._segments, self._segment_index, self._segment_time = segments, 0, 0.0
         self.state = "moving"
         return True
@@ -311,29 +424,46 @@ class ChessArmController:
     def _apply_event(self, event: MotionEvent | None) -> None:
         if event is None:
             return
+        world = self._active_world()
         if event.kind == "pick":
-            self.world.pick(event.piece_id)
+            world.pick(event.piece_id)
         elif event.kind == "drop":
-            self.world.drop(event.piece_id, event.x_mm, event.y_mm, event.square)
-        elif event.kind == "promote":
-            self.world.promote(event.piece_id, event.new_kind)
+            world.drop(event.piece_id, event.x_mm, event.y_mm, event.square)
+        elif event.kind == "promote" and isinstance(world, ChessWorld):
+            world.promote(event.piece_id, event.new_kind)
 
     def _finish_move(self) -> None:
         self.state = "idle"
         self._segments = []
         self._status_note = ""
-        if self.board.is_game_over():
-            outcome = self.board.outcome()
-            reason = outcome.termination.name.replace("_", " ").lower() if outcome else "game over"
-            self._log(f"Game over: {self.board.result()} ({reason}).")
+        if self._is_game_over():
+            self._log(self._game_over_text())
             return
-        if self.board.is_check():
+        if self._in_check():
             self._log("Check.")
         self._maybe_auto_play()
+
+    def _in_check(self) -> bool:
+        if self.chess_arm_is_chess():
+            return self.board.is_check()
+        return xiangqi_rules_in_check(self.xiangqi_position, self.xiangqi_position.red_to_move)
+
+    def _game_over_text(self) -> str:
+        if self.chess_arm_is_chess():
+            outcome = self.board.outcome()
+            reason = outcome.termination.name.replace("_", " ").lower() if outcome else "game over"
+            return f"Game over: {self.board.result()} ({reason})."
+        return f"Game over: {xiangqi_rules_winner(self.xiangqi_position)} wins (the other side has no legal move)."
 
     # ----------------------------------------------------------- read-outs
     def chess_arm_scene(self) -> WorldScene:
         """Meshes for the viewport."""
+        if not self.chess_arm_is_chess():
+            if self._xiangqi_glyphs is None:  # needs the Qt application, so it waits for the first xiangqi frame
+                self._xiangqi_glyphs = {key: glyph_bitmap_render(character, _GLYPH_CELLS)
+                                        for key, character in XIANGQI_PIECE_CHARS.items()}
+            return xiangqi_scene_build(self.xiangqi_world, self.geometry, self.joints, self.gripper_mm,
+                                       self._highlights, self._xiangqi_glyphs)
         return world_scene_build(self.world, self.geometry, self.joints, self.gripper_mm, self._highlights)
 
     def chess_arm_joint_text(self) -> list[str]:
@@ -347,9 +477,12 @@ class ChessArmController:
 
     def chess_arm_status_text(self) -> str:
         """Who is to move and what the arm is doing."""
-        if self.board.is_game_over():
-            return f"Game over  {self.board.result()}"
-        turn = "White" if self.board.turn == chess.WHITE else "Black"
+        if self._is_game_over():
+            if self.chess_arm_is_chess():
+                return f"Game over  {self.board.result()}"
+            return f"Game over  {xiangqi_rules_winner(self.xiangqi_position)} wins"
+        white_name = "White" if self.chess_arm_is_chess() else "Red"
+        turn = white_name if self._red_or_white_to_move() else "Black"
         if self.state == "thinking":
             return f"{turn} to move  -  Gemini is thinking"
         if self.state == "moving":
