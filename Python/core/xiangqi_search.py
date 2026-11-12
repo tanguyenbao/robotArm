@@ -8,15 +8,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.xiangqi_board import XIANGQI_FILES
+import random
+
+from core.xiangqi_board import XIANGQI_FILES, XIANGQI_RANKS
 from core.xiangqi_rules import (XiangqiMove, XiangqiPosition, xiangqi_rules_in_check, xiangqi_rules_legal_moves,
                                 xiangqi_rules_play, xiangqi_rules_pseudo_moves)
 
 XIANGQI_SEARCH_DEPTH = 3
 XIANGQI_SEARCH_MARGIN = 150     # centipawns: moves rated within this of the best stay in the list
 XIANGQI_SEARCH_LIMIT = 12
+XIANGQI_SEARCH_TOLERANCE = 25   # the engine plays any move rated within this of the best one, so games differ
+XIANGQI_MATE_SCORE = 50000      # scores from this up mean a forced win inside the search horizon
 _QUIET_DEPTH = 2
-_MATE = 50000
+_MATE = XIANGQI_MATE_SCORE
 _INFINITY = 10 ** 9
 _VALUE = {"K": 10000, "R": 900, "C": 450, "H": 400, "E": 200, "A": 200, "P": 100}
 _KIND_NAMES = {"K": "general", "R": "chariot", "C": "cannon", "H": "horse", "E": "elephant", "A": "advisor", "P": "soldier"}
@@ -39,6 +43,10 @@ def _evaluate(grid: list[str | None], red: bool) -> int:
         value = _VALUE[kind]
         if kind == "P" and ((square >= 5 * XIANGQI_FILES) if symbol.isupper() else (square < 5 * XIANGQI_FILES)):
             value += 100
+        if kind in ("R", "H", "C"):  # a few centipawns for activity, so equal-material moves are not all alike
+            rank_index, file_index = divmod(square, XIANGQI_FILES)
+            progress = rank_index if symbol.isupper() else XIANGQI_RANKS - 1 - rank_index
+            value += 3 * progress + (3 * (4 - abs(file_index - 4)) if kind != "R" else 0)
         total += value if symbol.isupper() == red else -value
     return total
 
@@ -130,3 +138,14 @@ def xiangqi_search_candidates(position: XiangqiPosition, depth: int = XIANGQI_SE
         best = max(best, score)
     kept = sorted((item for item in scored if item[1] > best - margin), key=lambda item: -item[1])[:limit]
     return [XiangqiCandidate(move, score, _note(position, move)) for move, score in kept]
+
+
+def xiangqi_search_choose(position: XiangqiPosition, depth: int = XIANGQI_SEARCH_DEPTH,
+                          tolerance: int = XIANGQI_SEARCH_TOLERANCE) -> tuple[XiangqiMove, int] | None:
+    """The engine's move (one of the best, picked at random among those within `tolerance`) and its score in centipawns
+    for the side to move. None when there is no legal move."""
+    candidates = xiangqi_search_candidates(position, depth, tolerance, XIANGQI_SEARCH_LIMIT)
+    if not candidates:
+        return None
+    chosen = random.choice([item for item in candidates if item.score >= candidates[0].score - tolerance])
+    return chosen.move, chosen.score

@@ -1,4 +1,4 @@
-"""Main window: 3D viewport, Gemini / game / arm cards and the log, on a moonsilver glass layout."""
+"""Main window: 3D viewport, Gemini companion / game / arm cards, the log and the chat, on a moonsilver glass layout."""
 from __future__ import annotations
 
 import sys
@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, QTimer, Qt, Signal
 from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPlainTextEdit,
                                QSlider, QVBoxLayout, QWidget)
 
+from adapters.audio_io import AudioError, AudioPlayer, MicCapture
 from adapters.gemini_client import GeminiModel
 from features.chess_arm.chess_arm_controller import CHESS_ARM_GAME_TYPES, CHESS_ARM_ROBOT_SIDES, ChessArmController
 from ui.glass_widgets import GlassCard, MetalButton, MoonsilverBackground
@@ -16,8 +17,7 @@ from ui.theme import STYLE_SHEET
 from ui.viewport import SceneViewport
 
 _TICK_MS = 33
-_CONNECTION_KINDS = ("Standard", "Live")
-_PREFERRED_MODELS = {"Standard": "gemini-2.5-flash", "Live": "gemini-3.8-live-extended-thinking"}
+_BOTTOM_HEIGHT = 190
 
 
 class _UiPoster(QObject):
@@ -47,7 +47,7 @@ def _card(title: str) -> tuple[GlassCard, QVBoxLayout]:
 class MainWindow(QMainWindow):
     def __init__(self, controller_class: type[ChessArmController]) -> None:
         super().__init__()
-        self.setWindowTitle("RobotArm - Chess with Gemini")
+        self.setWindowTitle("RobotArm - Chess companion")
         self.resize(1360, 820)
         self._poster = _UiPoster()
         self.controller = controller_class(self._poster.post, self._append_log)
@@ -82,10 +82,14 @@ class MainWindow(QMainWindow):
         self._viewport = SceneViewport(self.controller.chess_arm_scene)
         self._viewport.clicked.connect(self._on_viewport_click)
         left.addWidget(self._viewport, 1)
+        bottom = QHBoxLayout()
+        bottom.setSpacing(12)
         self._log_view = QPlainTextEdit()
         self._log_view.setReadOnly(True)
-        self._log_view.setFixedHeight(150)
-        left.addWidget(self._log_view)
+        self._log_view.setFixedHeight(_BOTTOM_HEIGHT)
+        bottom.addWidget(self._log_view, 1)
+        bottom.addWidget(self._build_chat_card(), 1)
+        left.addLayout(bottom)
         root.addLayout(left, 1)
 
         right = QVBoxLayout()
@@ -100,6 +104,16 @@ class MainWindow(QMainWindow):
         right.setContentsMargins(0, 0, 0, 0)
         root.addWidget(side)
 
+        self._player: AudioPlayer | None = None
+        self._player_failed = False
+        self._mic: MicCapture | None = None
+        companion = self.controller.companion
+        companion.chat_listener = self._append_chat
+        companion.status_listener = self._on_companion_status
+        companion.audio_play = self._play_audio
+        companion.audio_stop = self._stop_audio
+        companion.audio_busy = self._audio_busy
+
         self._clock = time.perf_counter()
         self._last_texts: tuple = ()
         timer = QTimer(self)
@@ -109,23 +123,16 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- cards
     def _build_gemini_card(self) -> GlassCard:
-        card, layout = _card("Gemini")
+        card, layout = _card("Gemini companion")
         self._key_edit = QLineEdit()
         self._key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._key_edit.setPlaceholderText("API key (empty = use GEMINI_API_KEY)")
         self._key_edit.textChanged.connect(lambda text: setattr(self.controller, "api_key", text))
         layout.addWidget(self._key_edit)
 
-        self._connection_combo = QComboBox()
-        self._connection_combo.addItems(_CONNECTION_KINDS)
-        self._connection_combo.setToolTip("Standard = generateContent (one request per move). "
-                                          "Live = WebSocket session; fast, and models answer in voice, so the text comes from the transcription.")
-        self._connection_combo.currentTextChanged.connect(self._on_connection_changed)
-        layout.addWidget(self._connection_combo)
-
         self._model_combo = QComboBox()
         self._model_combo.setEditable(True)
-        self._model_combo.lineEdit().setPlaceholderText("Model - press Refresh, or type a name")
+        self._model_combo.lineEdit().setPlaceholderText("Live model - press Refresh, or type a name")
         self._model_combo.setCurrentIndex(-1)
         self._model_combo.currentTextChanged.connect(lambda text: setattr(self.controller, "model_name", text))
         layout.addWidget(self._model_combo)
@@ -133,15 +140,36 @@ class MainWindow(QMainWindow):
         self._refresh_button = MetalButton("Refresh models", "silver")
         self._refresh_button.clicked.connect(self._on_refresh_models)
         layout.addWidget(self._refresh_button)
-        note = QLabel("The key stays in memory only; it is never saved.")
+
+        buttons = QHBoxLayout()
+        self._connect_button = MetalButton("Connect companion", "black")
+        self._connect_button.clicked.connect(self.controller.chess_arm_companion_toggle)
+        self._mic_button = MetalButton("Mic: off", "silver")
+        self._mic_button.clicked.connect(self._on_mic_toggle)
+        buttons.addWidget(self._connect_button)
+        buttons.addWidget(self._mic_button)
+        layout.addLayout(buttons)
+        note = QLabel("The engine plays; Gemini Live chats about the game. The key stays in memory only.")
         note.setObjectName("caption")
         note.setWordWrap(True)
         layout.addWidget(note)
         return card
 
+    def _build_chat_card(self) -> GlassCard:
+        card, layout = _card("Chat with Gemini")
+        card.setFixedHeight(_BOTTOM_HEIGHT)
+        self._chat_view = QPlainTextEdit()
+        self._chat_view.setReadOnly(True)
+        layout.addWidget(self._chat_view, 1)
+        self._chat_edit = QLineEdit()
+        self._chat_edit.setPlaceholderText("Say something to Gemini (Enter), or turn the mic on and talk")
+        self._chat_edit.returnPressed.connect(self._on_chat_send)
+        layout.addWidget(self._chat_edit)
+        return card
+
     def _build_game_card(self) -> GlassCard:
         card, layout = _card("Game")
-        caption = QLabel("Gemini plays")
+        caption = QLabel("Robot (engine) plays")
         caption.setObjectName("caption")
         layout.addWidget(caption)
         self._side_combo = QComboBox()
@@ -161,7 +189,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(move_row)
 
         button_row = QHBoxLayout()
-        gemini_button = MetalButton("Gemini move now", "silver")
+        gemini_button = MetalButton("Robot move now", "silver")
         gemini_button.clicked.connect(self.controller.chess_arm_request_robot_move)
         new_button = MetalButton("New game", "black")
         new_button.clicked.connect(self._on_new_game)
@@ -208,10 +236,57 @@ class MainWindow(QMainWindow):
         self._move_edit.setPlaceholderText("Your move: e2e4 or Nf3" if is_chess else "Your move: h2e2 (files a-i, ranks 0-9)")
         self._viewport.refresh()
 
-    def _on_connection_changed(self, text: str) -> None:
-        self.controller.use_live = text == "Live"
-        self._model_combo.clear()  # a Standard model name does not work on Live and the other way round
-        self._append_log(f"Connection: {text}. Press Refresh models to load the matching model list.")
+    def _on_chat_send(self) -> None:
+        text = self._chat_edit.text()
+        self._chat_edit.clear()
+        self.controller.chess_arm_companion_say(text)
+
+    def _append_chat(self, line: str) -> None:
+        self._chat_view.appendPlainText(line)
+
+    def _on_companion_status(self, active: bool) -> None:
+        self._connect_button.setText("Disconnect companion" if active else "Connect companion")
+        if not active:
+            self._stop_mic()
+
+    def _on_mic_toggle(self) -> None:
+        if self._mic is not None:
+            self._stop_mic()
+            return
+        if not self.controller.chess_arm_companion_ensure_connected():
+            return
+        try:
+            mic = MicCapture(self.controller.chess_arm_companion_audio)
+            mic.start()
+        except AudioError as failure:
+            self._append_log(f"Microphone: {failure}")
+            return
+        self._mic = mic
+        self._mic_button.setText("Mic: on")
+        self._append_log("Microphone on. It is muted while Gemini speaks (use headphones to avoid echo).")
+
+    def _stop_mic(self) -> None:
+        if self._mic is not None:
+            self._mic.stop()
+            self._mic = None
+        self._mic_button.setText("Mic: off")
+
+    def _play_audio(self, pcm16_24k: bytes) -> None:
+        if self._player is None and not self._player_failed:
+            try:
+                self._player = AudioPlayer()
+            except AudioError as failure:
+                self._player_failed = True
+                self._append_log(f"Speaker: {failure}. The words still appear in the chat.")
+        if self._player is not None:
+            self._player.write(pcm16_24k)
+
+    def _stop_audio(self) -> None:
+        if self._player is not None:
+            self._player.interrupt()
+
+    def _audio_busy(self) -> bool:
+        return self._player is not None and self._player.is_playing()
 
     def _on_refresh_models(self) -> None:
         self._refresh_button.setEnabled(False)
@@ -229,11 +304,10 @@ class MainWindow(QMainWindow):
             self._model_combo.addItem(model.name)
             self._model_combo.setItemData(self._model_combo.count() - 1, model.display_name, Qt.ItemDataRole.ToolTipRole)
         names = [model.name for model in models]
-        preferred = _PREFERRED_MODELS[self._connection_combo.currentText()]
-        choice = previous if previous in names else (preferred if preferred in names else (names[0] if names else ""))
+        chatty = [name for name in names if "live" in name and "extended-thinking" not in name]  # thinking only slows a chat
+        choice = previous if previous in names else (chatty[0] if chatty else (names[0] if names else ""))
         self._model_combo.setCurrentText(choice)
-        kind = "support the Live API" if self.controller.use_live else "can generate text"
-        self._append_log(f"{len(models)} models {kind}. Selected: {choice or 'none'}.")
+        self._append_log(f"{len(models)} models support the Live API. Selected: {choice or 'none'}.")
 
     def _on_play_move(self) -> None:
         if self.controller.chess_arm_submit_move_text(self._move_edit.text()):

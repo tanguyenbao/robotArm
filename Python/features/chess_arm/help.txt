@@ -1,4 +1,4 @@
-chess_arm - a 6-joint (RRRRRR) robot arm plays chess in a 3D simulator. Gemini chooses the robot's moves.
+chess_arm - a 6-joint (RRRRRR) robot arm plays chess or xiangqi in a 3D simulator. An engine chooses the robot's moves; Gemini Live chats about the game.
 
 Run:  python main.py            (opens the window; chess_arm is the default feature)
 
@@ -8,27 +8,32 @@ Header
                black 將士象馬車砲卒) drawn from a system font (Microsoft JhengHei / YaHei).
                Full rules: legal moves, check, flying general, horse leg, elephant eye, river, cannon screen.
                The game ends when the side to move has no legal move (that side loses). No repetition rule.
-               Gemini reads a xiangqi board badly, so a 3-ply material search (core/xiangqi_search.py, 2-4 s) first
-               removes every move that loses material or walks into a mate; Gemini picks from the remaining
-               candidates (up to 12, within 1.5 soldiers of the best) and the list is shown in the log.
-               "Gemini plays White" reads "Red" in xiangqi. Moves are typed in ICCS: h2e2 = from h2 to e2
+               The engine is a 3-ply material search plus a little activity; xiangqi moves are announced in the
+               traditional Vietnamese notation (pháo 2 bình 5: files counted from the mover's right).
+               "Robot plays White" reads "Red" in xiangqi. Moves are typed in ICCS: h2e2 = from h2 to e2
                (files a-i left to right, ranks 0-9 from the red back rank). Click-to-move works as in chess.
-Gemini card
+Gemini companion card
+  The robot's moves come from a built-in engine (chess: core/chess_search.py, xiangqi: core/xiangqi_search.py, about
+  2-4 s per move). Gemini Live is only the companion: it says the robot's move as its own ("pháo 2 bình 5 ... để xem
+  bạn làm gì nhé"), comments on your moves and chats. It never picks a move.
   API key      typed here (kept in memory only) or taken from the GEMINI_API_KEY environment variable.
-  Connection   Standard = one generateContent request per move. Live = a WebSocket session (needs the websockets
-               package); fast, but the models answer in voice, so the move is read from the transcription.
-               Changing it clears the model box: press "Refresh models" again for the matching list.
-  Model        press "Refresh models" to list every model of your key that can generate text, then pick one.
-               The box is editable: you can also type any model name. Nothing is hard-coded.
+  Model        press "Refresh models" to list the models of your key that support the Live API, then pick one.
+               The box is editable. Models named "...extended-thinking" work but think before every sentence.
+  Connect companion   opens one Live session for the whole game (needs the websockets package). The game itself
+               also runs without it. Closing the session and connecting again restarts the chat; the new session is
+               told the current position.
+  Mic          streams your voice to Gemini while on (16 kHz mono). It is muted while Gemini speaks, so use
+               headphones if you want to talk over it. Your words and its answers appear in the chat box.
+  Chat box     type a message and press Enter: Gemini answers aloud and in the chat box.
+  Gemini only knows the game through messages the software sends after each move (move in words, facts, the board).
+
 Game card
-  Gemini plays Black / White / Both (Gemini vs Gemini) / None (manual).
+  Robot (engine) plays Black / White / Both (engine vs engine, waits for the companion to finish talking) / None.
   Click        click one of your pieces (side to move): its legal squares light up (gold = move, red = capture);
                click a lit square and the arm plays it. A pawn reaching the last rank becomes a queen.
                Click another piece to change the selection, click anywhere else to cancel.
   Your move    UCI (e2e4, e7e8q) or SAN (Nf3, O-O), then Play or Enter.
-  Gemini move now   ask Gemini for the side to move.
+  Robot move now    let the engine play the side to move.
   New game     reset board and arm; the side picked in "Gemini plays" ends up nearest to the arm.
 Arm card
   Speed slider and live joint angles. Mouse in the 3D view: drag = orbit, wheel = zoom, double-click = reset view.
-
-If Gemini answers with an illegal move it is asked again (3 tries), then the game waits for you.

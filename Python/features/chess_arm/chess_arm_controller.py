@@ -1,7 +1,7 @@
-"""Feature: the robot arm plays chess or xiangqi, with Gemini choosing the robot's moves. No Qt in here.
+"""Feature: the robot arm plays chess or xiangqi with a built-in engine, while Gemini Live chats as the companion. No Qt in here.
 
-The UI gives two callbacks: `post_to_ui` (runs a function on the UI thread, used to bring Gemini answers back from the
-worker thread) and `log` (appends a line to the log panel).
+The UI gives two callbacks: `post_to_ui` (runs a function on the UI thread, used to bring worker-thread results back)
+and `log` (appends a line to the log panel).
 
 Squares are integers in both games (chess: python-chess square, xiangqi: rank * 9 + file), so selection, highlights and
 the arm animation are shared. "White" in the robot-side list means Red when xiangqi is on the table.
@@ -10,35 +10,36 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import Callable
 
 import chess
 import numpy as np
 
-from adapters.gemini_client import GeminiError, GeminiModel, gemini_client_generate_text, gemini_client_list_models
-from adapters.gemini_live_client import gemini_live_generate_text
+from adapters.gemini_client import GeminiError, GeminiModel, gemini_client_list_models
 from adapters.glyph_bitmap import glyph_bitmap_render
 from core.arm_model import ARM_JOINT_NAMES, ArmGeometry, arm_model_home_joints
 from core.arm_visual import ARM_GRIPPER_OPEN_MM
 from core.chess_motion import ChessMotionError, MotionEvent, MotionSegment, chess_motion_plan, xiangqi_motion_plan
 from core.chess_pieces import CHESS_PIECE_HEIGHT_MM
 from core.chess_world import ChessWorld
-from core.gemini_prompt import (GEMINI_LIVE_FOLLOW_UP, GEMINI_LIVE_SYSTEM_PROMPT, chess_move_from_text,
-                                gemini_prompt_build, gemini_prompt_parse_move)
+from core.chess_search import CHESS_MATE_SCORE, chess_search_choose
+from core.companion_prompt import CompanionTurn, companion_prompt_assessment, companion_prompt_turn
+from core.gemini_prompt import chess_move_from_text
 from core.world_scene import WorldScene, world_scene_build, world_scene_tool_position
 from core.xiangqi_board import XIANGQI_DISC_HEIGHT_MM, XIANGQI_PIECE_CHARS
-from core.xiangqi_prompt import (XIANGQI_LIVE_FOLLOW_UP, XIANGQI_LIVE_SYSTEM_PROMPT, xiangqi_prompt_build,
-                                 xiangqi_prompt_parse_move)
-from core.xiangqi_rules import (XiangqiMove, XiangqiPosition, xiangqi_rules_in_check, xiangqi_rules_legal_moves,
-                                xiangqi_rules_move_from_text, xiangqi_rules_play, xiangqi_rules_start,
-                                xiangqi_rules_winner)
+from core.xiangqi_notation import xiangqi_notation_piece_name, xiangqi_notation_vietnamese
+from core.xiangqi_rules import (XiangqiMove, XiangqiPosition, xiangqi_rules_ascii, xiangqi_rules_in_check,
+                                xiangqi_rules_legal_moves, xiangqi_rules_move_from_text, xiangqi_rules_play,
+                                xiangqi_rules_start, xiangqi_rules_winner)
 from core.xiangqi_scene import xiangqi_scene_build
-from core.xiangqi_search import XiangqiCandidate, xiangqi_search_candidates
+from core.xiangqi_search import XIANGQI_MATE_SCORE, xiangqi_search_choose
 from core.xiangqi_world import XiangqiWorld
+from features.chess_arm.companion import ChessCompanion
 
 CHESS_ARM_GAME_TYPES = ("Chess", "Xiangqi (Cờ tướng)")
-CHESS_ARM_ROBOT_SIDES = ("Black", "White", "Both (Gemini vs Gemini)", "None (manual)")
-_MAX_GEMINI_TRIES = 3
+CHESS_ARM_ROBOT_SIDES = ("Black", "White", "Both (engine vs engine)", "None (manual)")
+_AUTO_WAIT_S = 25.0   # engine vs engine: longest the robot waits for the companion to finish talking
 _HIGHLIGHT_RGB = (0.45, 0.62, 0.95)
 _SELECTED_RGB = (0.96, 0.82, 0.40)
 _CAPTURE_RGB = (0.93, 0.50, 0.50)
@@ -53,7 +54,7 @@ def _smoothstep(fraction: float) -> float:
 
 
 class ChessArmController:
-    """Game state, arm animation and the Gemini player."""
+    """Game state, arm animation, the engine that plays the robot side and the Gemini companion."""
 
     def __init__(self, post_to_ui: Callable[[Callable[[], None]], None], log: Callable[[str], None]) -> None:
         self._post_to_ui = post_to_ui
@@ -68,8 +69,11 @@ class ChessArmController:
         self.xiangqi_history: list[str] = []
         self._xiangqi_glyphs: dict[tuple[str, bool], tuple[str, ...]] | None = None
         self.api_key = ""
-        self.use_live = False  # True: ask Gemini through the Live API (WebSocket) instead of generateContent
         self.model_name = ""
+        self.companion = ChessCompanion(post_to_ui, log, self._companion_session_text)
+        self._last_user_move_text = ""         # the person's last move in words, told to the companion with the robot's reply
+        self._engine_score = 0                 # engine score of the robot's latest move, centipawns for the robot
+        self._auto_wait_deadline: float | None = None
         self.robot_side = CHESS_ARM_ROBOT_SIDES[0]
         self.speed = 1.0
         self.joints = arm_model_home_joints()
@@ -82,7 +86,7 @@ class ChessArmController:
         self._last_move_squares: tuple[int, ...] = ()
         self._selected: int | None = None
         self._targets: dict[int, chess.Move | XiangqiMove] = {}
-        self._generation = 0                   # bumped on a new game so stale Gemini answers are ignored
+        self._generation = 0                   # bumped on a new game so stale engine answers are ignored
         self._auto_blocked = False
         self._status_note = ""
         self.chess_arm_new_game()
@@ -132,11 +136,15 @@ class ChessArmController:
         self._auto_blocked = False
         self._status_note = ""
         self.state = "idle"
+        self._last_user_move_text = ""
+        self._auto_wait_deadline = None
         self._log(f"New {'chess' if self.chess_arm_is_chess() else 'xiangqi'} game. {first_mover} moves first.")
         self._maybe_auto_play()
+        if self.state == "idle":  # when the robot opens, its first move is announced instead
+            self.companion.companion_notify(companion_prompt_turn(self._turn_for_companion("new_game")))
 
     def chess_arm_set_robot_side(self, side: str) -> None:
-        """Choose which colour(s) Gemini plays ('Red' is the xiangqi name of 'White')."""
+        """Choose which colour(s) the robot engine plays ('Red' is the xiangqi name of 'White')."""
         self.robot_side = "White" if side == "Red" else side
         self._auto_blocked = False
         self._maybe_auto_play()
@@ -251,7 +259,7 @@ class ChessArmController:
         self._highlights = highlights
 
     def chess_arm_request_robot_move(self) -> None:
-        """Ask Gemini for a move for the side to move, now."""
+        """Let the engine play the side to move, now."""
         if self.state != "idle":
             self._log("The arm is busy, wait for it to finish.")
             return
@@ -261,15 +269,14 @@ class ChessArmController:
         self._auto_blocked = False
         self._start_thinking()
 
-    # -------------------------------------------------------------- gemini
+    # ------------------------------------------------------- gemini companion
     def chess_arm_refresh_models(self, done: Callable[[list[GeminiModel], str], None]) -> None:
-        """Fetch the model list in a worker thread; `done(models, error)` runs on the UI thread."""
+        """Fetch the Live model list in a worker thread; `done(models, error)` runs on the UI thread."""
         api_key = self._resolve_api_key()
-        method = "bidiGenerateContent" if self.use_live else "generateContent"
 
         def work() -> None:
             try:
-                models, error = gemini_client_list_models(api_key, method=method), ""
+                models, error = gemini_client_list_models(api_key, method="bidiGenerateContent"), ""
             except GeminiError as failure:
                 models, error = [], str(failure)
             self._post_to_ui(lambda: done(models, error))
@@ -279,104 +286,142 @@ class ChessArmController:
     def _resolve_api_key(self) -> str:
         return self.api_key.strip() or os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
 
-    def _start_thinking(self) -> None:
-        model_name = self.model_name.strip()
-        if not model_name:
-            self._log("Pick a Gemini model first (press Refresh models).")
-            self._auto_blocked = True
+    def chess_arm_companion_toggle(self) -> None:
+        """Connect the Gemini Live companion, or disconnect it when it is already connected."""
+        if self.companion.companion_is_active():
+            self.companion.companion_disconnect()
+        else:
+            self.chess_arm_companion_ensure_connected()
+
+    def chess_arm_companion_ensure_connected(self) -> bool:
+        return self.companion.companion_connect(self._resolve_api_key(), self.model_name.strip())
+
+    def chess_arm_companion_say(self, text: str) -> None:
+        """The person typed something for the companion (connects first when needed)."""
+        text = text.strip()
+        if text and self.chess_arm_companion_ensure_connected():
+            self.companion.companion_say(text)
+
+    def chess_arm_companion_audio(self, pcm16_16k: bytes) -> None:
+        """Microphone data for the companion."""
+        self.companion.companion_send_audio(pcm16_16k)
+
+    def _robot_side_name(self) -> str:
+        if self.robot_side in ("White", "Black"):
+            return "Red" if (self.robot_side == "White" and not self.chess_arm_is_chess()) else self.robot_side
+        return "both sides (engine against itself)" if self.robot_side == CHESS_ARM_ROBOT_SIDES[2] else "none"
+
+    def _turn_for_companion(self, kind: str) -> CompanionTurn:
+        """A turn description filled with the current game state."""
+        if self.chess_arm_is_chess():
+            board_text, history, name = str(self.board), list(self.san_history), "chess"
+        else:
+            board_text, history, name = (xiangqi_rules_ascii(self.xiangqi_position), list(self.xiangqi_history), "xiangqi")
+        result = self._game_over_text() if self._is_game_over() else ""
+        return CompanionTurn(kind, name, self._robot_side_name(), board_text=board_text, history=history, result=result)
+
+    def _companion_session_text(self) -> str:
+        """First message of a new Live session: the position as it is now."""
+        turn = self._turn_for_companion("session_start")
+        white_name = "White" if self.chess_arm_is_chess() else "Red"
+        turn.facts.append(f"{white_name if self._red_or_white_to_move() else 'Black'} is to move")
+        return companion_prompt_turn(turn)
+
+    def _describe_move(self, move: chess.Move | XiangqiMove) -> tuple[str, list[str]]:
+        """(the move in words, facts about it) for a move on the CURRENT position, before it is pushed."""
+        facts: list[str] = []
+        if self.chess_arm_is_chess():
+            piece = self.board.piece_at(move.from_square)
+            spoken = (f"{chess.piece_name(piece.piece_type)} from {chess.square_name(move.from_square)} to "
+                      f"{chess.square_name(move.to_square)} (written {self.board.san(move)})")
+            if self.board.is_capture(move):
+                victim = self.board.piece_at(move.to_square)
+                facts.append(f"it captures a {chess.piece_name(victim.piece_type) if victim else 'pawn'}")
+            if self.board.is_castling(move):
+                facts.append("it is castling")
+            if move.promotion:
+                facts.append("the pawn promotes to a queen")
+        else:
+            grid = self.xiangqi_position.grid
+            spoken = f"{xiangqi_notation_vietnamese(grid, move)} (ICCS {move.iccs()})"
+            victim = grid[move.to_square]
+            if victim is not None:
+                facts.append(f"it captures a {xiangqi_notation_piece_name(victim)}")
+        return spoken, facts
+
+    def _notify_companion_move(self, spoken: str, facts: list[str], robot: bool) -> None:
+        """Tell the companion about the move that was just pushed (the position is already the one after it)."""
+        if not self.companion.companion_is_active():
             return
+        if self._in_check():
+            facts = facts + ["it gives check"]
+        if robot:
+            turn = self._turn_for_companion("robot_move")
+            turn.user_move, self._last_user_move_text = self._last_user_move_text, ""
+            turn.robot_move, turn.facts = spoken, facts
+            mate_score = CHESS_MATE_SCORE if self.chess_arm_is_chess() else XIANGQI_MATE_SCORE
+            turn.assessment = companion_prompt_assessment(self._engine_score, mate_score)
+            self.companion.companion_notify(companion_prompt_turn(turn))
+            return
+        text = spoken + (f" ({'; '.join(facts)})" if facts else "")
+        if self._robot_plays_turn():
+            self._last_user_move_text = text  # told together with the robot's answer, so the model speaks once
+            return
+        turn = self._turn_for_companion("user_move")
+        turn.user_move = text
+        self.companion.companion_notify(companion_prompt_turn(turn))
+
+    def _robot_plays_turn(self) -> bool:
+        """True when the engine is the one to move now."""
+        if self._is_game_over():
+            return False
+        turn_is_white = self._red_or_white_to_move()
+        return (self.robot_side == CHESS_ARM_ROBOT_SIDES[2]
+                or (self.robot_side == "White" and turn_is_white)
+                or (self.robot_side == "Black" and not turn_is_white))
+
+    # --------------------------------------------------------------- engine
+    def _start_thinking(self) -> None:
         self.state = "thinking"
         generation = self._generation
-        api_key = self._resolve_api_key()
-        live = self.use_live
         if self.chess_arm_is_chess():
-            board_copy, history = self.board.copy(), list(self.san_history)
-            side = "White" if board_copy.turn == chess.WHITE else "Black"
-            build_prompt = lambda feedback: gemini_prompt_build(board_copy, history, feedback)  # noqa: E731
-            parse_move = lambda text: gemini_prompt_parse_move(text, board_copy)  # noqa: E731
-            system_prompt, follow_up = GEMINI_LIVE_SYSTEM_PROMPT, GEMINI_LIVE_FOLLOW_UP
-            prepare = lambda: None  # noqa: E731
+            board_copy = self.board.copy()
+            search = lambda: chess_search_choose(board_copy)  # noqa: E731
         else:
             position_copy = XiangqiPosition(list(self.xiangqi_position.grid), self.xiangqi_position.red_to_move)
-            history = list(self.xiangqi_history)
-            side = "Red" if position_copy.red_to_move else "Black"
-            candidates: list[XiangqiCandidate] = []  # filled by prepare() in the worker thread: the search takes seconds
-            build_prompt = lambda feedback: xiangqi_prompt_build(position_copy, history, candidates, feedback)  # noqa: E731
-            parse_move = lambda text: xiangqi_prompt_parse_move(text, position_copy, candidates)  # noqa: E731
-            system_prompt, follow_up = XIANGQI_LIVE_SYSTEM_PROMPT, XIANGQI_LIVE_FOLLOW_UP
-
-            def prepare() -> None:
-                candidates[:] = xiangqi_search_candidates(position_copy)
-                listing = ", ".join(f"{item.move.iccs()}{' (' + item.note + ')' if item.note else ''} {item.score:+d}"
-                                    for item in candidates)
-                self._post_to_ui(lambda: self._log(f"Engine candidates for Gemini: {listing}"))
-        self._log(f"Gemini ({model_name}{', Live' if live else ''}) is thinking as {side} ...")
-
-        def has_move(text: str) -> bool:
-            try:
-                parse_move(text)
-                return True
-            except ValueError:
-                return False
-
-        def ask(prompt: str) -> str:
-            if live:
-                return gemini_live_generate_text(
-                    api_key, model_name, prompt, 120.0, system_instruction=system_prompt, accept=has_move,
-                    follow_up=follow_up,
-                    trace=lambda text: self._post_to_ui(lambda line=text: self._log(f"Gemini Live: {line}"))
-                    if text.startswith("no usable") else None)
-            return gemini_client_generate_text(
-                api_key, model_name, prompt,
-                on_retry=lambda text: self._post_to_ui(lambda line=text: self._log(f"Gemini: {line}")))
+            search = lambda: xiangqi_search_choose(position_copy)  # noqa: E731
 
         def work() -> None:
-            prepare()
-            feedback = ""
-            for attempt in range(1, _MAX_GEMINI_TRIES + 1):
-                try:
-                    answer = ask(build_prompt(feedback))
-                except GeminiError as failure:
-                    self._post_to_ui(lambda message=str(failure): self._on_gemini_failed(generation, message))
-                    return
-                try:
-                    move = parse_move(answer)
-                except ValueError as problem:
-                    feedback = str(problem)
-                    self._post_to_ui(lambda n=attempt, text=feedback: self._log(f"Gemini answer {n} refused: {text}"))
-                    continue
-                self._post_to_ui(lambda found=move: self._on_gemini_move(generation, found, model_name))
-                return
-            self._post_to_ui(lambda: self._on_gemini_failed(generation, f"no legal move after {_MAX_GEMINI_TRIES} tries"))
+            choice = search()
+            self._post_to_ui(lambda: self._on_engine_move(generation, choice))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_gemini_move(self, generation: int, move: chess.Move | XiangqiMove, model_name: str) -> None:
+    def _on_engine_move(self, generation: int, choice: tuple[chess.Move | XiangqiMove, int] | None) -> None:
         if generation != self._generation or self.state != "thinking":
             return
         self.state = "idle"
-        if not self._start_move(move, f"Gemini ({model_name})"):
+        if choice is None:
+            self._auto_blocked = True
+            self._log("The engine has no legal move.")
+            return
+        move, self._engine_score = choice
+        if not self._start_move(move, "Robot", robot=True):
             self._auto_blocked = True
 
-    def _on_gemini_failed(self, generation: int, message: str) -> None:
-        if generation != self._generation:
-            return
-        self.state = "idle"
-        self._auto_blocked = True
-        self._log(f"Gemini failed: {message}")
-
     def _maybe_auto_play(self) -> None:
-        if self.state != "idle" or self._auto_blocked or self._is_game_over():
+        if self.state != "idle" or self._auto_blocked or not self._robot_plays_turn():
             return
-        turn_is_white = self._red_or_white_to_move()
-        wanted = (self.robot_side == CHESS_ARM_ROBOT_SIDES[2]
-                  or (self.robot_side == "White" and turn_is_white)
-                  or (self.robot_side == "Black" and not turn_is_white))
-        if wanted:
-            self._start_thinking()
+        if (self.robot_side == CHESS_ARM_ROBOT_SIDES[2] and self.companion.companion_is_busy()
+                and (self._auto_wait_deadline is None or time.monotonic() < self._auto_wait_deadline)):
+            if self._auto_wait_deadline is None:  # engine against itself: let the companion finish talking first
+                self._auto_wait_deadline = time.monotonic() + _AUTO_WAIT_S
+            return
+        self._auto_wait_deadline = None
+        self._start_thinking()
 
     # ---------------------------------------------------------------- moves
-    def _start_move(self, move: chess.Move | XiangqiMove, who: str) -> bool:
+    def _start_move(self, move: chess.Move | XiangqiMove, who: str, robot: bool = False) -> bool:
         chess_game = self.chess_arm_is_chess()
         try:
             if chess_game:
@@ -386,6 +431,7 @@ class ChessArmController:
         except ChessMotionError as failure:
             self._log(f"Cannot play {move.uci() if chess_game else move.iccs()}: {failure}")
             return False
+        spoken, facts = self._describe_move(move)
         if chess_game:
             san = self.board.san(move)
             number = self.board.fullmove_number
@@ -404,10 +450,13 @@ class ChessArmController:
         self._log(f"{prefix}{text} by {who}")
         self._segments, self._segment_index, self._segment_time = segments, 0, 0.0
         self.state = "moving"
+        self._notify_companion_move(spoken, facts, robot)
         return True
 
     def chess_arm_tick(self, seconds: float) -> bool:
         """Advance the animation. Returns True when the picture changed."""
+        if self._auto_wait_deadline is not None and self.state == "idle":
+            self._maybe_auto_play()  # engine against itself, waiting for the companion to finish talking
         if self.state != "moving":
             return False
         segment = self._segments[self._segment_index]
@@ -494,7 +543,7 @@ class ChessArmController:
         white_name = "White" if self.chess_arm_is_chess() else "Red"
         turn = white_name if self._red_or_white_to_move() else "Black"
         if self.state == "thinking":
-            return f"{turn} to move  -  Gemini is thinking"
+            return f"{turn} to move  -  the robot is thinking"
         if self.state == "moving":
             return f"Arm moving  -  {self._status_note}"
         return f"{turn} to move"
