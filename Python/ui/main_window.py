@@ -107,6 +107,7 @@ class MainWindow(QMainWindow):
         self._player: AudioPlayer | None = None
         self._player_failed = False
         self._mic: MicCapture | None = None
+        self.controller.state_listener = self._sync_from_controller
         companion = self.controller.companion
         companion.chat_listener = self._append_chat
         companion.status_listener = self._on_companion_status
@@ -229,9 +230,17 @@ class MainWindow(QMainWindow):
 
     def _on_game_type_changed(self, text: str) -> None:
         self.controller.chess_arm_set_game_type(text)
+        self._sync_from_controller()
+
+    def _sync_from_controller(self) -> None:
+        """Show the game type and robot side the controller holds (the companion can change them by itself)."""
         is_chess = self.controller.chess_arm_is_chess()
-        self._side_combo.blockSignals(True)  # only the label changes, the choice stays (White = Red)
+        self._game_type_combo.blockSignals(True)
+        self._game_type_combo.setCurrentText(self.controller.game_type)
+        self._game_type_combo.blockSignals(False)
+        self._side_combo.blockSignals(True)  # no signal: the controller already knows
         self._side_combo.setItemText(1, "White" if is_chess else "Red")
+        self._side_combo.setCurrentIndex(CHESS_ARM_ROBOT_SIDES.index(self.controller.robot_side))
         self._side_combo.blockSignals(False)
         self._move_edit.setPlaceholderText("Your move: e2e4 or Nf3" if is_chess else "Your move: h2e2 (files a-i, ranks 0-9)")
         self._viewport.refresh()

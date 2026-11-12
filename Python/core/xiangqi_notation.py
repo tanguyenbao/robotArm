@@ -7,8 +7,11 @@ apart with 'trước' (the front one) and 'sau' (the back one).
 """
 from __future__ import annotations
 
+import re
+import unicodedata
+
 from core.xiangqi_board import XIANGQI_FILES
-from core.xiangqi_rules import XiangqiMove
+from core.xiangqi_rules import XiangqiMove, XiangqiPosition, xiangqi_rules_legal_moves
 
 _NAMES_RED = {"K": "tướng", "A": "sĩ", "E": "tượng", "H": "mã", "R": "xe", "C": "pháo", "P": "binh"}
 _NAMES_BLACK = {"K": "tướng", "A": "sĩ", "E": "tượng", "H": "mã", "R": "xe", "C": "pháo", "P": "tốt"}
@@ -41,3 +44,33 @@ def xiangqi_notation_vietnamese(grid: list[str | None], move: XiangqiMove) -> st
     else:
         where = str(file_number(from_file))
     return f"{xiangqi_notation_piece_name(symbol)} {where} {action} {target}"
+
+
+_NUMBER_WORDS = {"một": "1", "hai": "2", "ba": "3", "bốn": "4", "tư": "4", "năm": "5", "sáu": "6", "bảy": "7", "tám": "8",
+                 "chín": "9"}
+
+
+def _normalise(text: str, strip_accents: bool) -> str:
+    lowered = unicodedata.normalize("NFC", text.lower())
+    words = re.findall(r"[^\W_]+", lowered)
+    words = [_NUMBER_WORDS.get(word, word) for word in words if word not in ("số", "so")]
+    joined = " ".join("binh" if word == "tốt" else word for word in words)
+    if strip_accents:
+        decomposed = unicodedata.normalize("NFD", joined.replace("đ", "d"))
+        joined = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return joined
+
+
+def xiangqi_notation_find_move(text: str, position: XiangqiPosition) -> XiangqiMove | None:
+    """The legal move a player named in words ('pháo 2 bình 5', 'Pháo hai bình năm'), or None.
+
+    Exact words are tried first. Without accents (speech to text loses them) the answer must be unique,
+    because 'tướng' and 'tượng' only differ by an accent."""
+    legal = xiangqi_rules_legal_moves(position)
+    for strip_accents in (False, True):
+        wanted = _normalise(text, strip_accents)
+        found = [move for move in legal
+                 if _normalise(xiangqi_notation_vietnamese(position.grid, move), strip_accents) == wanted]
+        if len(found) == 1:
+            return found[0]
+    return None

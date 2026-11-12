@@ -28,7 +28,7 @@ from core.companion_prompt import CompanionTurn, companion_prompt_assessment, co
 from core.gemini_prompt import chess_move_from_text
 from core.world_scene import WorldScene, world_scene_build, world_scene_tool_position
 from core.xiangqi_board import XIANGQI_DISC_HEIGHT_MM, XIANGQI_PIECE_CHARS
-from core.xiangqi_notation import xiangqi_notation_piece_name, xiangqi_notation_vietnamese
+from core.xiangqi_notation import xiangqi_notation_find_move, xiangqi_notation_piece_name, xiangqi_notation_vietnamese
 from core.xiangqi_rules import (XiangqiMove, XiangqiPosition, xiangqi_rules_ascii, xiangqi_rules_in_check,
                                 xiangqi_rules_legal_moves, xiangqi_rules_move_from_text, xiangqi_rules_play,
                                 xiangqi_rules_start, xiangqi_rules_winner)
@@ -71,6 +71,8 @@ class ChessArmController:
         self.api_key = ""
         self.model_name = ""
         self.companion = ChessCompanion(post_to_ui, log, self._companion_session_text)
+        self.companion.tool_handler = self._companion_tool
+        self.state_listener: Callable[[], None] = lambda: None   # the UI re-reads game type and robot side from here
         self._last_user_move_text = ""         # the person's last move in words, told to the companion with the robot's reply
         self._engine_score = 0                 # engine score of the robot's latest move, centipawns for the robot
         self._auto_wait_deadline: float | None = None
@@ -160,7 +162,8 @@ class ChessArmController:
         if self.chess_arm_is_chess():
             move = chess_move_from_text(text.strip(), self.board)
         else:
-            move = xiangqi_rules_move_from_text(text, self.xiangqi_position)
+            move = (xiangqi_rules_move_from_text(text, self.xiangqi_position)
+                    or xiangqi_notation_find_move(text, self.xiangqi_position))
         if move is None:
             self._log(f"'{text.strip()}' is not a legal move here.")
             return False
@@ -305,6 +308,50 @@ class ChessArmController:
     def chess_arm_companion_audio(self, pcm16_16k: bytes) -> None:
         """Microphone data for the companion."""
         self.companion.companion_send_audio(pcm16_16k)
+
+    def _companion_tool(self, name: str, args: dict) -> str:
+        """Run a tool the companion called; the answer text goes back to the model."""
+        if name == "set_game":
+            wanted = {"chess": CHESS_ARM_GAME_TYPES[0], "xiangqi": CHESS_ARM_GAME_TYPES[1]}.get(str(args.get("game", "")).lower())
+            if wanted is None:
+                return "error: game must be chess or xiangqi"
+            if wanted == self.game_type:
+                self.chess_arm_new_game()
+            else:
+                self.chess_arm_set_game_type(wanted)
+            result = f"a new {args['game']} game is on the table"
+        elif name == "play_move":
+            return self._companion_play_move(str(args.get("move", "")))
+        elif name == "new_game":
+            self.chess_arm_new_game()
+            result = "the game was reset to the starting position"
+        elif name == "set_robot_side":
+            sides = {"white": "White", "black": "Black", "both": CHESS_ARM_ROBOT_SIDES[2], "none": CHESS_ARM_ROBOT_SIDES[3]}
+            side = sides.get(str(args.get("side", "")).lower())
+            if side is None:
+                return "error: side must be white, black, both or none"
+            self.chess_arm_set_robot_side(side)
+            result = f"the robot now plays {self._robot_side_name()}"
+        else:
+            return f"error: unknown tool {name}"
+        self.state_listener()
+        return result
+
+    def _companion_play_move(self, text: str) -> str:
+        """The person's move, relayed by the companion. The reply says what happened, or why not."""
+        if self._is_game_over():
+            return "error: the game is over"
+        if self.state != "idle" or self._robot_plays_turn():
+            return "error: it is not the person's turn (the arm is moving or the robot is to play)"
+        if self.chess_arm_submit_move_text(text):
+            return ("the person's move is being played on the board. The robot answers by itself in a moment and you "
+                    "will get a [GAME EVENT] for it: do not comment yet")
+        if self.chess_arm_is_chess():
+            legal = [self.board.san(move) for move in self.board.legal_moves]
+        else:
+            legal = [xiangqi_notation_vietnamese(self.xiangqi_position.grid, move)
+                     for move in xiangqi_rules_legal_moves(self.xiangqi_position)]
+        return f"error: '{text}' is not a legal move here. Legal moves: {', '.join(legal)}"
 
     def _robot_side_name(self) -> str:
         if self.robot_side in ("White", "Black"):

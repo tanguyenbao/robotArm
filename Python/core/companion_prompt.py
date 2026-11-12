@@ -21,8 +21,27 @@ COMPANION_SYSTEM_PROMPT = (
     "say so honestly when you are unsure. When the person talks to you, answer like a conversation partner: briefly and "
     "naturally. You may discuss the position using the latest board in the last event.\n"
     "Speak, do not write: no markdown, no lists, never read the board diagram aloud. Reply in Vietnamese unless the person "
-    "speaks another language."
+    "speaks another language.\n"
+    "You control the game with tools. When the person asks to play another game, to start over, or to change who plays "
+    "which side, CALL the matching tool; saying yes without calling it changes nothing on the table. After the tool "
+    "answers, tell the person what happened. When the person tells you THEIR move (by voice or by typing, in any "
+    "notation), call play_move with it, written exactly as they said it; the robot places the piece for them. "
+    "After a play_move that succeeds, say nothing about the position: your answer comes as a [GAME EVENT] right after."
 )
+
+COMPANION_TOOLS = [
+    {"name": "set_game", "description": "Put a new game of this kind on the table and start it (chess or xiangqi / cờ tướng).",
+     "parameters": {"type": "OBJECT", "properties": {"game": {"type": "STRING", "enum": ["chess", "xiangqi"]}},
+                    "required": ["game"]}},
+    {"name": "play_move",
+     "description": "Play the PERSON's move on the board. xiangqi: Vietnamese notation like 'pháo 2 bình 5' or ICCS like h2e2; chess: SAN like Nf3 or UCI like e2e4.",
+     "parameters": {"type": "OBJECT", "properties": {"move": {"type": "STRING"}}, "required": ["move"]}},
+    {"name": "new_game", "description": "Reset the current game to its starting position.", "parameters": {"type": "OBJECT", "properties": {}}},
+    {"name": "set_robot_side",
+     "description": "Choose which side the robot (you) plays: white (red in xiangqi), black, both (engine against itself) or none.",
+     "parameters": {"type": "OBJECT", "properties": {"side": {"type": "STRING", "enum": ["white", "black", "both", "none"]}},
+                    "required": ["side"]}},
+]
 
 _INSTRUCTIONS = {
     "robot_move": "Say your move out loud as you play it, and react to the person's move, in one to three short sentences.",

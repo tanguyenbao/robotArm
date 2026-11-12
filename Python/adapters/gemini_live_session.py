@@ -4,7 +4,8 @@ One background thread owns the socket: it sends what other threads queue and rea
 model does is reported through one callback `on_event(kind, value)`, called on that thread:
   opened (None) | audio (bytes, 16-bit mono 24 kHz) | input_text (str, transcription of the person's voice)
   output_text (str, transcription of the model's voice) | turn_complete (None) | interrupted (None)
-  closed (str reason, always the last event) | note (str, something worth logging)
+  tool_call (dict: id, name, args; answer with send_tool_response) | note (str, something worth logging)
+  closed (str reason, always the last event)
 The API key goes in the WebSocket URL, as the docs require; the URL is never logged and the key is scrubbed from errors.
 """
 from __future__ import annotations
@@ -25,7 +26,9 @@ _POLL_S = 0.02
 
 class GeminiLiveSession:
     def __init__(self, api_key: str, model_name: str, system_instruction: str,
-                 on_event: Callable[[str, object], None], thinking_level: str = "LOW") -> None:
+                 on_event: Callable[[str, object], None], thinking_level: str = "LOW",
+                 tools: list[dict] | None = None) -> None:
+        self._tools = tools or []
         self._api_key = api_key
         self._model_name = model_name
         self._system_instruction = system_instruction
@@ -56,6 +59,10 @@ class GeminiLiveSession:
         if self._open:
             self._outgoing.put(("audio", pcm16_16k))
 
+    def send_tool_response(self, call_id: str, name: str, result: str) -> None:
+        """Answer a tool_call event."""
+        self._outgoing.put(("tool", {"id": call_id, "name": name, "response": {"result": result}}))
+
     def _scrub(self, text: str) -> str:
         return text.replace(self._api_key, "<key>") if self._api_key else text
 
@@ -63,10 +70,13 @@ class GeminiLiveSession:
         generation: dict = {"responseModalities": ["AUDIO"]}
         if "extended-thinking" in self._model_name:  # these models refuse a session without a thinking level
             generation["thinkingConfig"] = {"thinkingLevel": self._thinking_level}
-        return {"model": f"models/{self._model_name}", "generationConfig": generation,
-                "systemInstruction": {"parts": [{"text": self._system_instruction}]},
-                "inputAudioTranscription": {}, "outputAudioTranscription": {},
-                "contextWindowCompression": {"slidingWindow": {}}}  # a long game must not hit the session length limit
+        setup = {"model": f"models/{self._model_name}", "generationConfig": generation,
+                 "systemInstruction": {"parts": [{"text": self._system_instruction}]},
+                 "inputAudioTranscription": {}, "outputAudioTranscription": {},
+                 "contextWindowCompression": {"slidingWindow": {}}}  # a long game must not hit the session length limit
+        if self._tools:
+            setup["tools"] = [{"functionDeclarations": self._tools}]
+        return setup
 
     def _run(self) -> None:
         reason = "closed"
@@ -121,6 +131,8 @@ class GeminiLiveSession:
                 return
             if kind == "text":
                 socket.send(json.dumps({"realtimeInput": {"text": payload}}))
+            elif kind == "tool":
+                socket.send(json.dumps({"toolResponse": {"functionResponses": [payload]}}))
             else:
                 data = base64.b64encode(payload).decode("ascii")
                 socket.send(json.dumps({"realtimeInput": {"audio": {"data": data, "mimeType": f"audio/pcm;rate={GEMINI_LIVE_INPUT_RATE}"}}}))
@@ -128,6 +140,8 @@ class GeminiLiveSession:
     def _handle(self, message: dict) -> None:
         if "goAway" in message:
             self._on_event("note", "the server will close the session soon (goAway)")
+        for call in message.get("toolCall", {}).get("functionCalls", []):
+            self._on_event("tool_call", {"id": call.get("id", ""), "name": call.get("name", ""), "args": call.get("args", {})})
         content = message.get("serverContent", {})
         if content.get("interrupted"):
             self._on_event("interrupted", None)

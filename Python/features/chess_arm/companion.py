@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Callable
 
 from adapters.gemini_live_session import GeminiLiveSession
-from core.companion_prompt import COMPANION_SYSTEM_PROMPT
+from core.companion_prompt import COMPANION_SYSTEM_PROMPT, COMPANION_TOOLS
 
 
 def _ignore(*_arguments) -> None:
@@ -31,6 +31,7 @@ class ChessCompanion:
         self.audio_play: Callable[[bytes], None] = _ignore           # model voice, 16-bit mono 24 kHz
         self.audio_stop: Callable[[], None] = _ignore                # the person interrupted: drop queued voice
         self.audio_busy: Callable[[], bool] = lambda: False          # True while the voice is still sounding
+        self.tool_handler: Callable[[str, dict], str] = lambda name, args: "not available"  # runs a tool the model called
 
     def companion_is_active(self) -> bool:
         """True from pressing Connect until the session closes."""
@@ -54,7 +55,8 @@ class ChessCompanion:
             self._log("Companion: pick a Live model first (press Refresh models).")
             return False
         session = GeminiLiveSession(api_key, model_name, COMPANION_SYSTEM_PROMPT,
-                                    lambda kind, value: self._post_to_ui(lambda: self._on_event(session, kind, value)))
+                                    lambda kind, value: self._post_to_ui(lambda: self._on_event(session, kind, value)),
+                                    tools=COMPANION_TOOLS)
         self._session = session
         self._log(f"Companion: connecting to {model_name} ...")
         session.send_text(self._describe_game())
@@ -110,6 +112,12 @@ class ChessCompanion:
         elif kind == "interrupted":
             self.audio_stop()
             self._flush_model(" ...")
+        elif kind == "tool_call":
+            call = dict(value)
+            self._log(f"Companion tool: {call['name']} {call['args']}")
+            result = self.tool_handler(call["name"], call["args"])
+            if self._session is not None:
+                self._session.send_tool_response(call["id"], call["name"], result)
         elif kind == "note":
             self._log(f"Companion: {value}")
         elif kind == "closed":

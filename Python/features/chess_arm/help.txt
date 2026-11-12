@@ -25,6 +25,9 @@ Gemini companion card
   Mic          streams your voice to Gemini while on (16 kHz mono). It is muted while Gemini speaks, so use
                headphones if you want to talk over it. Your words and its answers appear in the chat box.
   Chat box     type a message and press Enter: Gemini answers aloud and in the chat box.
+  Tools      Gemini can act on the game by itself: set_game (chess / xiangqi), new_game, set_robot_side and play_move
+             (your move said or typed in the chat, e.g. "pháo 2 bình 5" or "Nf3"; the robot then answers). The same
+             Vietnamese notation also works in the Your move box. Tool calls show in the log as "Companion tool: ...".
   Gemini only knows the game through messages the software sends after each move (move in words, facts, the board).
 
 Game card
