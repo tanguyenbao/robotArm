@@ -73,4 +73,29 @@ def xiangqi_notation_find_move(text: str, position: XiangqiPosition) -> XiangqiM
                  if _normalise(xiangqi_notation_vietnamese(position.grid, move), strip_accents) == wanted]
         if len(found) == 1:
             return found[0]
-    return None
+    return _find_capture(text, position, legal)
+
+
+def _kinds_named(word: str) -> set[str]:
+    """Piece kinds a word can mean ('tốt' and 'binh' are both the soldier; without accents 'tuong' is general or elephant)."""
+    word = _normalise(word, False)
+    exact = {kind for kind in "KAEHRCP" if _normalise(_NAMES_RED[kind], False) == word or _normalise(_NAMES_BLACK[kind], False) == word}
+    if exact:
+        return exact
+    return {kind for kind in "KAEHRCP" if _normalise(_NAMES_RED[kind], True) == word or _normalise(_NAMES_BLACK[kind], True) == word}
+
+
+def _find_capture(text: str, position: XiangqiPosition, legal: list[XiangqiMove]) -> XiangqiMove | None:
+    """'pháo ăn tốt' / 'tiến pháo ăn tốt': the single legal capture by that piece of that victim, else None."""
+    words = _normalise(text, False).split()
+    if "ăn" not in words:
+        return None
+    split = words.index("ăn")
+    mover_kinds = {kind for word in words[:split] for kind in _kinds_named(word)}
+    victim_kinds = {kind for word in words[split + 1:] for kind in _kinds_named(word)}
+    if not mover_kinds or not victim_kinds:
+        return None
+    found = [move for move in legal
+             if position.grid[move.from_square].upper() in mover_kinds
+             and position.grid[move.to_square] is not None and position.grid[move.to_square].upper() in victim_kinds]
+    return found[0] if len(found) == 1 else None

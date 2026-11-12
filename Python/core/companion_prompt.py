@@ -26,7 +26,10 @@ COMPANION_SYSTEM_PROMPT = (
     "which side, CALL the matching tool; saying yes without calling it changes nothing on the table. After the tool "
     "answers, tell the person what happened. When the person tells you THEIR move (by voice or by typing, in any "
     "notation), call play_move with it, written exactly as they said it; the robot places the piece for them. "
-    "After a play_move that succeeds, say nothing about the position: your answer comes as a [GAME EVENT] right after."
+    "After a play_move that succeeds, say nothing about the position: your answer comes as a [GAME EVENT] right after.\n"
+    "Each [GAME EVENT] lists the person's legal moves. When the person describes a move loosely, for example 'tiến pháo ăn tốt', find the matching move in that list and call play_move with its exact name; if two or more match, ask which one "
+    "in one short sentence. When the person asks for a hint or which piece can capture, tell them plainly from the list: "
+    "being helpful is fine, it is a friendly game."
 )
 
 COMPANION_TOOLS = [
@@ -64,6 +67,7 @@ class CompanionTurn:
     result: str = ""
     board_text: str = ""
     history: list[str] = field(default_factory=list)
+    person_moves: list[str] = field(default_factory=list)   # legal moves of the person, when it is their turn
 
 
 def companion_prompt_assessment(score_cp: int, mate_score: int) -> str:
@@ -102,5 +106,7 @@ def companion_prompt_turn(turn: CompanionTurn) -> str:
         lines.append(turn.board_text)
     if turn.history:
         lines.append("Moves so far: " + " ".join(turn.history[-40:]))
+    if turn.person_moves:
+        lines.append("The person's legal moves now (use these exact names with play_move): " + "; ".join(turn.person_moves) + ".")
     lines.append(_INSTRUCTIONS[turn.kind])
     return "\n".join(lines)

@@ -346,12 +346,7 @@ class ChessArmController:
         if self.chess_arm_submit_move_text(text):
             return ("the person's move is being played on the board. The robot answers by itself in a moment and you "
                     "will get a [GAME EVENT] for it: do not comment yet")
-        if self.chess_arm_is_chess():
-            legal = [self.board.san(move) for move in self.board.legal_moves]
-        else:
-            legal = [xiangqi_notation_vietnamese(self.xiangqi_position.grid, move)
-                     for move in xiangqi_rules_legal_moves(self.xiangqi_position)]
-        return f"error: '{text}' is not a legal move here. Legal moves: {', '.join(legal)}"
+        return f"error: '{text}' is not one exact legal move here. Legal moves: {'; '.join(self._legal_move_words())}"
 
     def _robot_side_name(self) -> str:
         if self.robot_side in ("White", "Black"):
@@ -365,7 +360,20 @@ class ChessArmController:
         else:
             board_text, history, name = (xiangqi_rules_ascii(self.xiangqi_position), list(self.xiangqi_history), "xiangqi")
         result = self._game_over_text() if self._is_game_over() else ""
-        return CompanionTurn(kind, name, self._robot_side_name(), board_text=board_text, history=history, result=result)
+        person_moves = [] if result or self._robot_plays_turn() else self._legal_move_words()
+        return CompanionTurn(kind, name, self._robot_side_name(), board_text=board_text, history=history, result=result,
+                             person_moves=person_moves)
+
+    def _legal_move_words(self) -> list[str]:
+        """Every legal move of the side to move, in words (chess: SAN, xiangqi: Vietnamese notation, captures marked)."""
+        if self.chess_arm_is_chess():
+            return [self.board.san(move) for move in self.board.legal_moves]
+        grid = self.xiangqi_position.grid
+        words = []
+        for move in xiangqi_rules_legal_moves(self.xiangqi_position):
+            name, victim = xiangqi_notation_vietnamese(grid, move), grid[move.to_square]
+            words.append(f"{name} (ăn {xiangqi_notation_piece_name(victim)})" if victim else name)
+        return words
 
     def _companion_session_text(self) -> str:
         """First message of a new Live session: the position as it is now."""
